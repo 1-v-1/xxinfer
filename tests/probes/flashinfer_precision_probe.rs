@@ -45,7 +45,21 @@ fn run_case(
 ) -> Result<()> {
     let kv_len = prefix_len + append_len;
     let num_pages = kv_len.div_ceil(page_size);
-    let dtype = DType::BF16;
+    // FlashInfer's prefill kernels reject bf16 below SM80 ("Prefill kernels
+    // do not support bf16 on sm75"), so legacy GPUs must probe with f16.
+    // XINFER_FLASHINFER_PROBE_DTYPE=f16 selects it explicitly.
+    let dtype = match std::env::var("XINFER_FLASHINFER_PROBE_DTYPE").as_deref() {
+        Ok("f16") => DType::F16,
+        Ok("bf16") => DType::BF16,
+        _ => DType::BF16,
+    };
+    // FlashInfer's FA2 configuration is head_dim sensitive; allow probing a
+    // smaller head dim to tell a configuration limit apart from an outright
+    // architecture gap.
+    let head_dim = match std::env::var("XINFER_FLASHINFER_PROBE_HEAD_DIM").as_deref() {
+        Ok(v) => v.parse::<usize>().unwrap_or(head_dim),
+        Err(_) => head_dim,
+    };
     let cache_dtype = if fp8_kv { DType::U8 } else { dtype };
     let k_all =
         Tensor::randn(0f32, 1f32, (kv_len, num_kv_heads, head_dim), device)?.to_dtype(dtype)?;

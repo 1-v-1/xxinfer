@@ -15,7 +15,9 @@ cuda,nccl,python,flashinfer,cutlass
 CUDA graph capture is auto-enabled with `cuda`; use `--disable-cuda-graph` at runtime to skip it.
 `flashinfer` or `flashattn` increases build time but improves long-context prefill/decoding performance.
 
-For V100, remove `flashattn` or `flashinfer`, and `cutlass`.
+For V100/SM75, keep `flashinfer` (it serves FP8 E4M3 KV through the FA2 path via
+software FP8; `build_docker.sh` passes `ENABLE_FLASHINFER_SOFTWARE_FP8=1`
+automatically for SM < 89) and remove `cutlass`.
 
 For single-GPU machines, you may remove `nccl`.
 

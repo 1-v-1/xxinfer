@@ -52,11 +52,17 @@ ENV CUDA_COMPUTE_CAP="${CUDA_COMPUTE_CAP}" \
 
 ARG BUILD_FEATURES
 ARG WITH_FEATURES="cuda,nccl,python,flashinfer,cutlass"
+# Set to 1 for pre-SM89 builds (SM70/75/80/89) that need the software FP8
+# (E4M3) FlashInfer attention path; empty otherwise.
+ARG ENABLE_FLASHINFER_SOFTWARE_FP8=""
 
 WORKDIR /xinfer
 COPY . .
 
 RUN set -eux; \
+  if [ -n "${ENABLE_FLASHINFER_SOFTWARE_FP8}" ]; then \
+    export ENABLE_FLASHINFER_SOFTWARE_FP8="${ENABLE_FLASHINFER_SOFTWARE_FP8}"; \
+  fi; \
   FEATURES="${BUILD_FEATURES:-$WITH_FEATURES}"; \
   if echo "${FEATURES}" | grep -q '\bpython\b'; then \
     echo "Python feature detected: adding deps and executing build.sh" && \

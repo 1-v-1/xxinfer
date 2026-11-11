@@ -4,13 +4,15 @@ This guide walks through building and running xInfer across CUDA/Metal, differen
 
 ## Build & features
 - **Backends**: `--features cuda[,nccl,graph,flashinfer,cutlass]` or `--features metal`. CPU-only is supported but slow.
-- **Quant/accel toggles**: `--kvcache-dtype fp8|turbo8|turbo4|turbo3` (KV cache quantization), `flashattn` or `flashinfer` (Ampere+), `--prefix-cache` (prefix KV reuse).
+- **Quant/accel toggles**: `--kvcache-dtype fp8|turbo8|turbo4|turbo3` (KV cache quantization), `flashattn` or `flashinfer` (SM70+; on SM70/75 the FlashInfer FA2 path serves FP8 E4M3 KV via software FP8 — export `ENABLE_FLASHINFER_SOFTWARE_FP8=1` when building on those GPUs), `--prefix-cache` (prefix KV reuse).
 - **Python bindings**: add feature `python` when building wheels (`./build.sh --features python`).
 
 ### Build (CUDA)
 ```shell
 # Remove `nccl` for single-gpu usage
-# Remove `flashattn`, `flashinfer` and `cutlass` for V100 or older hardware
+# `flashinfer` works from Volta (SM70) up: on SM70/75 build with
+# ENABLE_FLASHINFER_SOFTWARE_FP8=1 to compile the E4M3 KV path (FA2 raw-cast,
+# no hardware FP8 needed). Remove `cutlass` for V100 or older hardware.
 ./build.sh --release --features cuda,nccl,flashinfer,cutlass
 ```
 

@@ -32,7 +32,9 @@ SM_ARG accepts: sm_XX or XX (e.g. sm_90, 80, sm_70)
 CUDA_VERSION accepts: X.Y.Z or X.Y (e.g. 13.0.0, 12.9)
 
 Auto-detection rules:
-  SM70/SM75  → CUDA 12.9.0, features: cuda,nccl,python
+  SM70/SM75  → CUDA 12.9.0, features: cuda,nccl,python,flashinfer
+               (FlashInfer FA2 path + software FP8 E4M3 KV cache; the build
+               sets ENABLE_FLASHINFER_SOFTWARE_FP8=1 for these SM versions)
   SM80+      → CUDA 13.0.0, features: cuda,nccl,python,flashinfer,cutlass
 
 Examples:
@@ -139,7 +141,9 @@ fi
 
 if [[ "$SM_NUM" -lt 80 ]]; then
   DEFAULT_CUDA="12.9.0"
-  DEFAULT_FEATURES="cuda,nccl,python"
+  # SM70/75 ride the FlashInfer FA2 path with software FP8 (E4M3) KV cache:
+  # the FA2 kernels raw-cast FP8->float, so no hardware FP8 is required.
+  DEFAULT_FEATURES="cuda,nccl,python,flashinfer"
 else
   DEFAULT_CUDA="13.0.0"
   DEFAULT_FEATURES="cuda,nccl,python,flashinfer,cutlass"
@@ -159,6 +163,14 @@ fi
 
 WITH_FEATURES="${WITH_FEATURES:-$DEFAULT_FEATURES}"
 
+# Pre-SM89 CUDA archs have no hardware FP8; the FlashInfer E4M3 KV path is
+# compiled via the software-FP8 build switch instead.
+if [[ "$SM_NUM" -lt 89 ]]; then
+  SW_FP8_SWITCH="1"
+else
+  SW_FP8_SWITCH=""
+fi
+
 CUDA_MAJOR="${CUDA_VERSION%%.*}"
 if [[ "$CUDA_MAJOR" -ge 13 ]]; then
   CUDA_FLAVOR="devel"
@@ -172,6 +184,7 @@ echo "[build] SM=${SM_NUM} (${SM_SOURCE})"
 echo "[build] CUDA_VERSION=${CUDA_VERSION} (${CUDA_SOURCE})"
 echo "[build] CUDA_FLAVOR=${CUDA_FLAVOR}"
 echo "[build] WITH_FEATURES=${WITH_FEATURES}"
+[[ -n "$SW_FP8_SWITCH" ]] && echo "[build] ENABLE_FLASHINFER_SOFTWARE_FP8=${SW_FP8_SWITCH} (SM${SM_NUM} < 89: software FP8 E4M3 KV path)"
 echo "[build] UBUNTU_VERSION=${UBUNTU_VERSION}"
 echo "[build] CHINA_MIRROR=${CHINA_MIRROR} (${CHINA_SOURCE})"
 
@@ -182,6 +195,7 @@ docker build --network=host -f "${DOCKERFILE}" -t "${IMAGE_TAG}" \
   --build-arg WITH_FEATURES="${WITH_FEATURES}" \
   --build-arg CUDA_COMPUTE_CAP="${SM_NUM}" \
   --build-arg CHINA_MIRROR="${CHINA_MIRROR}" \
+  --build-arg ENABLE_FLASHINFER_SOFTWARE_FP8="${SW_FP8_SWITCH}" \
   .
 
 cat <<EOF
