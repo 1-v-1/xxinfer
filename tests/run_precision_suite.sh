@@ -74,8 +74,13 @@ fi
 
 export CUDA_COMPUTE_CAP="$compute_cap"
 if ((compute_cap == 70 || compute_cap == 75)); then
-  cuda_features="cuda,nccl"
-  run_flashinfer=0
+  # Volta/Turing have no hardware FP8, but the FlashInfer FA2 path runs there
+  # with FP8 E4M3 KV caches in software.  Build with the software-FP8 switch so
+  # the FlashInfer stages are actually exercised on these GPUs; the CUTLASS
+  # stages stay off because they target Blackwell/SM100+.
+  cuda_features="cuda,nccl,flashinfer"
+  run_flashinfer=1
+  export ENABLE_FLASHINFER_SOFTWARE_FP8=1
   # NVFP4 has a software CUDA implementation (decode, prefill/MoE, and
   # helpers) that must still be compared on legacy GPUs. Only the
   # Blackwell CUTLASS/FlashInfer NVFP4 cases are unavailable here.
@@ -84,7 +89,7 @@ if ((compute_cap == 70 || compute_cap == 75)); then
     echo "error: SM${compute_cap} requires an nvcc that supports compute_${compute_cap}; CUDA 13 removed this legacy target. Use CUDA 12.6 or another compatible CUDA 12 toolkit." >&2
     exit 2
   fi
-  printf 'SM%s legacy CUDA path: using features %s; FlashInfer/CUTLASS hardware stages are skipped; software FP8/NVFP4 stages remain enabled.\n' \
+  printf 'SM%s legacy CUDA path: using features %s with ENABLE_FLASHINFER_SOFTWARE_FP8=1; CUTLASS stages are skipped; FlashInfer (software FP8 KV) and software NVFP4 stages remain enabled.\n' \
     "$compute_cap" "$cuda_features"
 else
   cuda_features="cuda,nccl,flashinfer,cutlass"
@@ -169,11 +174,25 @@ if run_stage "GDN probe" env "${gdn_probe_env[@]}" \
 fi
 
 if ((run_flashinfer)); then
-  if run_stage "FlashInfer paged-attention probe" env \
-    XINFER_PROBE_DIR="$out_dir/flashinfer" \
-    "$ROOT_DIR/target/release/examples/flashinfer_precision_probe"; then
-    run_stage "FlashInfer/PyTorch/official-FlashInfer comparison" \
-      python3 tests/probes/compare_flashinfer_probe.py "$out_dir/flashinfer"
+  # FlashInfer's paged prefill does not launch on SM70 (Volta is outside
+  # FlashInfer's supported range, SM75+).  Its paged decode does work there,
+  # so legacy GPUs run the decode probe instead of the prefill one.
+  flashinfer_probe_dtype="${XINFER_FLASHINFER_PROBE_DTYPE:-}"
+  if ((compute_cap < 80)) && [[ -z "$flashinfer_probe_dtype" ]]; then
+    flashinfer_probe_dtype="f16"
+  fi
+  if ((compute_cap < 75)); then
+    run_stage "FlashInfer paged-decode probe (SM${compute_cap})" env \
+      XINFER_FI_SM70_DECODE_PROBE=1 \
+      "$ROOT_DIR/target/release/examples/flashinfer_sm70_decode_probe"
+  else
+    if run_stage "FlashInfer paged-attention probe" env \
+      XINFER_PROBE_DIR="$out_dir/flashinfer" \
+      XINFER_FLASHINFER_PROBE_DTYPE="$flashinfer_probe_dtype" \
+      "$ROOT_DIR/target/release/examples/flashinfer_precision_probe"; then
+      run_stage "FlashInfer/PyTorch/official-FlashInfer comparison" \
+        python3 tests/probes/compare_flashinfer_probe.py "$out_dir/flashinfer"
+    fi
   fi
 else
   echo "SKIP FlashInfer stages: unavailable on SM${compute_cap} legacy feature set"
