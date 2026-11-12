@@ -368,9 +368,27 @@ sudo apt-get install -y git build-essential
 
 export XINFER_REPO="https://github.com/guoqingbao/xinfer"
 # MacOS/Metal: replace features to `metal`
-# SM_70/SM_75 (e.g., V100): remove `flashinfer` and `cutlass` features
+# SM_70/SM_75 (e.g., V100): drop `cutlass` but keep `flashinfer`
 cargo install --git $XINFER_REPO xinfer --features cuda,nccl,flashinfer,cutlass
 ```
+
+**Volta/Turing (sm_70/sm_75)**
+
+This fork carries a set of Volta-specific optimisations.  Install from the
+`perf/sm70-volta` branch and keep the `flashinfer` feature:
+
+```bash
+export XINFER_REPO="https://github.com/1-v-1/xxinfer"
+git clone --branch perf/sm70-volta $XINFER_REPO
+cd xinfer
+# Drop `cutlass`: it targets SM100 and up.
+cargo install --path . --features cuda,nccl,flashinfer
+```
+
+The engine kernels come from the matching fork of `attention.rs`, pinned by
+revision, so no second checkout is needed.  On a V100 the software FP8 KV
+cache and the fused NVFP4 GEMM are what the branch adds; see
+`docs/sm70_acceleration_report.md` for the measurements.
 
 **Option 2 — Docker**
 ```bash
