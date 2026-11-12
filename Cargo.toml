@@ -129,6 +129,10 @@ name = "flashinfer_sm70_decode_probe"
 path = "tests/probes/flashinfer_sm70_decode_probe.rs"
 
 [[example]]
+name = "flashinfer_sm70_prefill_probe"
+path = "tests/probes/flashinfer_sm70_prefill_probe.rs"
+
+[[example]]
 name = "nvfp4_overhead_probe"
 path = "tests/probes/nvfp4_overhead_probe.rs"
 

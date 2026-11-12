@@ -808,15 +808,16 @@ impl ModelRunner {
                     None
                 };
                 // The prefill kernels have their own architecture
-                // requirement: they need more opt-in shared memory than
-                // SM70/SM75 provide and fail to launch there.  The decode
-                // kernels work on SM70, so the two are reported apart.
+                // requirement: the paged-prefill kernel copies the KV tiles
+                // with `cp.async`, an SM80+ instruction, so it cannot even
+                // be registered on Volta.  The decode kernels work on SM70,
+                // so the two are reported apart.
                 let prefill_sm_ok = compute_capability.map(|sm| sm >= 80).unwrap_or(false);
                 inputs.flashinfer_prefill_supported = prefill_sm_ok;
                 inputs.flashinfer_prefill_reason = if prefill_sm_ok {
                     None
                 } else {
-                    Some("the FlashInfer prefill kernels require SM80+ (shared-memory budget)")
+                    Some("the FlashInfer prefill kernels require SM80+ (cp.async is not available on Volta)")
                 };
             }
 

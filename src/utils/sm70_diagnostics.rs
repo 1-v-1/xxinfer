@@ -251,12 +251,13 @@ impl ReportInputs<'_> {
             Some("the chunked GDN prefill kernel is not enabled")
         };
 
-        // FlashInfer's prefill kernels need more opt-in shared memory than
-        // SM70/SM75 provide (64 KiB against the 164 KiB of SM80+).  At
-        // head_dim 256 the q/k/v staging union already fills that budget, so
-        // the launch fails with CUDA_ERROR_LAUNCH_FAILED there.  The decode
-        // kernels do run on SM70, which is why this is tracked separately
-        // from the FlashInfer backend as a whole.
+        // FlashInfer's paged-prefill kernel copies the KV tiles with `cp.async`,
+        // an SM80+ instruction that Volta (SM70) does not have.  The kernel
+        // cannot be lowered there, so registering it fails and the launch
+        // reports CUDA_ERROR_LAUNCH_FAILED.  It is not a shared-memory
+        // limit: the same failure occurs at every head_dim.
+        // The decode kernels do run on SM70, which is why this is tracked
+        // separately from the FlashInfer backend as a whole.
         let flashinfer_prefill_supported =
             flashinfer_built && compute_capability.map(|cc| cc >= 80).unwrap_or(false);
         let flashinfer_prefill_reason: Option<&'static str> = if !flashinfer_built {
@@ -264,7 +265,7 @@ impl ReportInputs<'_> {
         } else if flashinfer_prefill_supported {
             None
         } else {
-            Some("the FlashInfer prefill kernels require SM80+ (shared-memory budget)")
+            Some("the FlashInfer prefill kernels require SM80+ (cp.async is not available on Volta)")
         };
 
         Self {
@@ -452,7 +453,7 @@ mod tests {
         inputs.flashinfer_active = true;
         inputs.flashinfer_prefill_supported = false;
         inputs.flashinfer_prefill_reason =
-            Some("the FlashInfer prefill kernels require SM80+ (shared-memory budget)");
+            Some("the FlashInfer prefill kernels require SM80+ (cp.async is not available on Volta)");
         let report = build_report(inputs);
 
         let decode = report
