@@ -50,7 +50,7 @@ parking_lot = "0.12.4"
 # We never push to the upstream engine repository, so the dependency points at
 # the fork instead; a git reference keeps `cargo install --git` working, where
 # a path reference would force every user to clone the engine repo by hand.
-attention-rs = { git = "https://github.com/1-v-1/attention.rs.git", version = "0.6.9", rev = "d90f2c5" }
+attention-rs = { git = "https://github.com/1-v-1/attention.rs.git", version = "0.6.9", rev = "5cca03d" }
 once_cell = "1.21.3"
 memmap2 = "0.9"
 tqdm = "0.8.0"
@@ -151,13 +151,6 @@ path = "tests/probes/nvfp4_precision_probe.rs"
 [[example]]
 name = "nccl_error_code_probe"
 path = "tests/probes/nccl_error_code_probe.rs"
-
-# Use the working copy of our own attention.rs fork instead of the pinned git
-# revision.  The fork is developed locally and never pushed upstream, so a
-# git reference alone would hide every local fix.  `cargo install --git` still
-# works: the patch is only active when the sibling checkout is present.
-[patch."https://github.com/1-v-1/attention.rs.git"]
-attention-rs = { path = "../attention.rs" }
 
 [package.metadata.deb]
 name = "xinfer"
