@@ -89,7 +89,15 @@ pub fn run_runner() -> anyhow::Result<()> {
                     init_req.num_shards,
                     init_req.nccl_id.0,
                 )
-                .unwrap(),
+                .map_err(|e| crate::utils::nccl_err("comm_init_rank", e))
+                .map_err(|e| {
+                    xinfer::log_error!(
+                        "NCCL communicator init failed: rank={} num_shards={}",
+                        init_req.rank,
+                        init_req.num_shards
+                    );
+                    e
+                })?,
             );
 
             #[cfg(not(feature = "nccl"))]
@@ -272,25 +280,46 @@ pub fn run_runner() -> anyhow::Result<()> {
                     Seqs::SeqRefs(&sequences.iter().collect::<Vec<_>>()),
                     is_prefill,
                 );
-                if outputs.is_err() {
-                    xinfer::log_error!("Runner prefill error: {:?}", outputs);
+                match outputs {
+                    Ok(ids) => {
+                        send_local(
+                            &mut vec![stream.try_clone()?],
+                            &MessageType::RunResponse(ids),
+                            false,
+                        )?;
+                    }
+                    Err(e) => {
+                        // Report the real reason back to the engine instead of
+                        // an empty response, which would only surface as
+                        // "Runner step error, no response!".
+                        xinfer::log_error!("Runner prefill error: {:?}", e);
+                        send_local(
+                            &mut vec![stream.try_clone()?],
+                            &MessageType::Error(format!("Runner prefill error: {e:?}")),
+                            false,
+                        )?;
+                    }
                 }
-                send_local(
-                    &mut vec![stream.try_clone()?],
-                    &MessageType::RunResponse(outputs.unwrap_or(vec![])),
-                    false,
-                )?;
             }
             Ok(MessageType::RunDecode((sequences, is_prefill))) => {
                 let outputs = runner.run(Seqs::DecodeVec(&sequences), is_prefill);
-                if outputs.is_err() {
-                    xinfer::log_error!("Runner decode error: {:?}", outputs);
+                match outputs {
+                    Ok(ids) => {
+                        send_local(
+                            &mut vec![stream.try_clone()?],
+                            &MessageType::RunResponse(ids),
+                            false,
+                        )?;
+                    }
+                    Err(e) => {
+                        xinfer::log_error!("Runner decode error: {:?}", e);
+                        send_local(
+                            &mut vec![stream.try_clone()?],
+                            &MessageType::Error(format!("Runner decode error: {e:?}")),
+                            false,
+                        )?;
+                    }
                 }
-                send_local(
-                    &mut vec![stream.try_clone()?],
-                    &MessageType::RunResponse(outputs.unwrap_or(vec![])),
-                    false,
-                )?;
             }
             Ok(MessageType::RunDecodeMTP(sequences)) => {
                 let outputs = runner.run_mtp_decode(Seqs::DecodeVec(&sequences));

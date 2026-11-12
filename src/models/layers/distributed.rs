@@ -5,6 +5,8 @@ use crate::models::layers::linear::{
 use crate::models::layers::{isq_high_precision_quant, VarBuilderX};
 use crate::utils::config::QuantConfig;
 use crate::utils::gguf_helper::restore_qwen35_qkv_weight;
+#[cfg(all(feature = "cuda", feature = "nccl"))]
+use crate::utils::nccl_err;
 #[cfg(feature = "nccl")]
 pub use candle_core::cuda_backend::cudarc::nccl::safe::{Comm, Id};
 use candle_core::quantized::{GgmlDType, QTensor};
@@ -477,7 +479,7 @@ impl CustomOp1 for AllReduce {
                 let mut dst = unsafe { dev.alloc::<bf16>(elem_count) }.w()?;
                 self.comm
                     .all_reduce(&src_slice, &mut dst, &ReduceOp::Sum)
-                    .map_err(candle_core::Error::debug)?;
+                    .map_err(|e| nccl_err("all_reduce", e))?;
                 candle_core::CudaStorage::wrap_cuda_slice(dst, dev)
             }
             DType::F16 => {
@@ -496,7 +498,7 @@ impl CustomOp1 for AllReduce {
                 let mut dst = unsafe { dev.alloc::<f16>(elem_count) }.w()?;
                 self.comm
                     .all_reduce(&src_slice, &mut dst, &ReduceOp::Sum)
-                    .map_err(candle_core::Error::debug)?;
+                    .map_err(|e| nccl_err("all_reduce", e))?;
                 candle_core::CudaStorage::wrap_cuda_slice(dst, dev)
             }
             DType::F32 => {
@@ -515,7 +517,7 @@ impl CustomOp1 for AllReduce {
                 let mut dst = unsafe { dev.alloc::<f32>(elem_count) }.w()?;
                 self.comm
                     .all_reduce(&src_slice, &mut dst, &ReduceOp::Sum)
-                    .map_err(candle_core::Error::debug)?;
+                    .map_err(|e| nccl_err("all_reduce", e))?;
                 candle_core::CudaStorage::wrap_cuda_slice(dst, dev)
             }
             dtype => candle_core::bail!("unsupported dtype {dtype:?}"),
@@ -1577,7 +1579,7 @@ impl CustomOp1 for AllGather {
                 let mut dst = unsafe { dev.alloc::<bf16>(total_elems) }.w()?;
                 self.comm
                     .all_gather(&src_slice, &mut dst)
-                    .map_err(candle_core::Error::debug)?;
+                    .map_err(|e| nccl_err("all_gather", e))?;
                 candle_core::CudaStorage::wrap_cuda_slice(dst, dev)
             }
             DType::F16 => {
@@ -1596,7 +1598,7 @@ impl CustomOp1 for AllGather {
                 let mut dst = unsafe { dev.alloc::<f16>(total_elems) }.w()?;
                 self.comm
                     .all_gather(&src_slice, &mut dst)
-                    .map_err(candle_core::Error::debug)?;
+                    .map_err(|e| nccl_err("all_gather", e))?;
                 candle_core::CudaStorage::wrap_cuda_slice(dst, dev)
             }
             DType::F32 => {
@@ -1615,7 +1617,7 @@ impl CustomOp1 for AllGather {
                 let mut dst = unsafe { dev.alloc::<f32>(total_elems) }.w()?;
                 self.comm
                     .all_gather(&src_slice, &mut dst)
-                    .map_err(candle_core::Error::debug)?;
+                    .map_err(|e| nccl_err("all_gather", e))?;
                 candle_core::CudaStorage::wrap_cuda_slice(dst, dev)
             }
             dtype => candle_core::bail!("unsupported dtype for all_gather: {dtype:?}"),

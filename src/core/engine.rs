@@ -1158,6 +1158,9 @@ impl LLMEngine {
                                     candle_core::bail!("Remote worker returned empty response");
                                 }
                                 MessageType::RunResponse(_) => {} // OK
+                                MessageType::Error(msg) => {
+                                    candle_core::bail!("Remote worker reported an error: {}", msg);
+                                }
                                 other => {
                                     candle_core::bail!("Unexpected remote response: {:?}", other);
                                 }
@@ -1208,6 +1211,9 @@ impl LLMEngine {
                         } else {
                             Ok(output_ids)
                         }
+                    }
+                    MessageType::Error(msg) => {
+                        candle_core::bail!("Runner reported an error: {}", msg)
                     }
                     other => {
                         candle_core::bail!("Unexpected response type: {:?}", other)

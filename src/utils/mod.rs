@@ -149,6 +149,25 @@ pub fn new_device(ordinal: usize) -> Result<Device> {
     }
 }
 
+/// Turn a cudarc `NcclError` into a candle error that keeps the real
+/// `ncclResult_t` code.
+///
+/// `cudarc`'s own `Debug` impl for `NcclError` writes the literal string
+/// `"NcclError"` and throws the wrapped `ncclResult_t` away, so a failing
+/// collective only ever surfaces as `Err(NcclError)` in the logs. That makes
+/// it impossible to tell `ncclInvalidArgument` (a mismatched count on one of
+/// the ranks) apart from `ncclRemoteError` or a timeout. `ncclResult_t` is a
+/// plain `#[derive(Debug)]` enum, so formatting `err.0` prints the symbolic
+/// name.
+#[cfg(all(feature = "cuda", feature = "nccl"))]
+pub fn nccl_err(op: &str, err: candle_core::cuda_backend::cudarc::nccl::result::NcclError) -> candle_core::Error {
+    candle_core::Error::Msg(format!(
+        "NCCL {op} failed: {:?} (code={})",
+        err.0,
+        err.0 as i32
+    ))
+}
+
 /// GGUF integer array elements may be stored as u32 or i32.
 fn gguf_value_u32(v: &candle_core::quantized::gguf_file::Value) -> Option<u32> {
     v.to_u32()

@@ -144,6 +144,17 @@ path = "tests/probes/nvfp4_perf_probe.rs"
 name = "nvfp4_precision_probe"
 path = "tests/probes/nvfp4_precision_probe.rs"
 
+[[example]]
+name = "nccl_error_code_probe"
+path = "tests/probes/nccl_error_code_probe.rs"
+
+# Use the working copy of our own attention.rs fork instead of the pinned git
+# revision.  The fork is developed locally and never pushed upstream, so a
+# git reference alone would hide every local fix.  `cargo install --git` still
+# works: the patch is only active when the sibling checkout is present.
+[patch."https://github.com/1-v-1/attention.rs.git"]
+attention-rs = { path = "../attention.rs" }
+
 [package.metadata.deb]
 name = "xinfer"
 maintainer = "xInfer Team"

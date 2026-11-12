@@ -139,6 +139,15 @@ pub struct ReportInputs<'a> {
     pub flashinfer_active: bool,
     /// Why FlashInfer was skipped, when it was.
     pub flashinfer_skip_reason: Option<&'a str>,
+    /// Whether the FlashInfer *prefill* kernels can run on this device.
+    ///
+    /// FlashInfer's prefill kernels need more opt-in shared memory than
+    /// SM70/SM75 provide at head_dim 256, so they fail to launch there while
+    /// the decode kernels work fine.  The report keeps the two apart so a
+    /// `[ok] flashinfer_attention` line does not hide a prefill fallback.
+    pub flashinfer_prefill_supported: bool,
+    /// Why the FlashInfer prefill path is unavailable, when it is.
+    pub flashinfer_prefill_reason: Option<&'a str>,
     /// Whether the build enables CUTLASS kernels.
     pub cutlass_built: bool,
     /// Whether the loaded model actually dispatches to CUTLASS kernels.
@@ -242,12 +251,30 @@ impl ReportInputs<'_> {
             Some("the chunked GDN prefill kernel is not enabled")
         };
 
+        // FlashInfer's prefill kernels need more opt-in shared memory than
+        // SM70/SM75 provide (64 KiB against the 164 KiB of SM80+).  At
+        // head_dim 256 the q/k/v staging union already fills that budget, so
+        // the launch fails with CUDA_ERROR_LAUNCH_FAILED there.  The decode
+        // kernels do run on SM70, which is why this is tracked separately
+        // from the FlashInfer backend as a whole.
+        let flashinfer_prefill_supported =
+            flashinfer_built && compute_capability.map(|cc| cc >= 80).unwrap_or(false);
+        let flashinfer_prefill_reason: Option<&'static str> = if !flashinfer_built {
+            Some("build lacks the `flashinfer` feature")
+        } else if flashinfer_prefill_supported {
+            None
+        } else {
+            Some("the FlashInfer prefill kernels require SM80+ (shared-memory budget)")
+        };
+
         Self {
             compute_capability,
             architecture,
             uses_nvfp4_weights,            flashinfer_built,
             flashinfer_active: flashinfer_built && flashinfer_skip_reason.is_none(),
             flashinfer_skip_reason,
+            flashinfer_prefill_supported,
+            flashinfer_prefill_reason,
             cutlass_built,
             cutlass_active,
             cuda_graph_built,
@@ -295,6 +322,20 @@ pub fn build_report(inputs: ReportInputs<'_>) -> AccelerationReport {
             "flashinfer_attention",
             inputs.flashinfer_skip_reason.unwrap_or("not initialized"),
         ));
+    }
+
+    // The prefill and decode kernels have different architecture
+    // requirements, so they are reported separately: on SM70/SM75 the decode
+    // kernels work while the prefill kernels do not.
+    if inputs.flashinfer_built {
+        if inputs.flashinfer_prefill_supported {
+            entries.push(CapabilityEntry::enabled("flashinfer_prefill"));
+        } else {
+            entries.push(CapabilityEntry::disabled(
+                "flashinfer_prefill",
+                inputs.flashinfer_prefill_reason.unwrap_or("not available on this device"),
+            ));
+        }
     }
 
     // --- CUTLASS kernels --------------------------------------------------
@@ -387,6 +428,8 @@ mod tests {
             flashinfer_built: false,
             flashinfer_active: false,
             flashinfer_skip_reason: None,
+            flashinfer_prefill_supported: false,
+            flashinfer_prefill_reason: None,
             cutlass_built: false,
             cutlass_active: false,
             cuda_graph_built: true,
@@ -395,6 +438,37 @@ mod tests {
             gdn_prefill_reason: Some("SM70 uses the reference recurrence"),
             kv_cache_dtype: "F16",
         }
+    }
+
+    #[test]
+    fn flashinfer_prefill_is_reported_as_unavailable_on_sm70() {
+        // FlashInfer's prefill kernels need more opt-in shared memory than
+        // SM70 provides and fail to launch there, which used to surface as a
+        // CUDA error picked up by the next NCCL collective (`Err(NcclError)`).
+        // The report has to say so, otherwise `[ok] flashinfer_attention`
+        // hides the prefill fallback.
+        let mut inputs = base_inputs("Qwen3_5ForConditionalGeneration");
+        inputs.flashinfer_built = true;
+        inputs.flashinfer_active = true;
+        inputs.flashinfer_prefill_supported = false;
+        inputs.flashinfer_prefill_reason =
+            Some("the FlashInfer prefill kernels require SM80+ (shared-memory budget)");
+        let report = build_report(inputs);
+
+        let decode = report
+            .entries
+            .iter()
+            .find(|e| e.name == "flashinfer_attention")
+            .unwrap();
+        assert!(decode.enabled);
+
+        let prefill = report
+            .entries
+            .iter()
+            .find(|e| e.name == "flashinfer_prefill")
+            .unwrap();
+        assert!(!prefill.enabled);
+        assert!(prefill.reason.as_ref().unwrap().contains("SM80+"));
     }
 
     #[test]
