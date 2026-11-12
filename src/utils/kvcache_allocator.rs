@@ -320,7 +320,11 @@ fn uses_cutlass_workspace(config: &Config) -> bool {
     {
         candle_core::Device::cuda_if_available(0)
             .ok()
-            .and_then(|d| attention_rs::cuda_utils::sm_version(&d))
+            .and_then(|d| {
+                d.as_cuda_device()
+                    .ok()
+                    .and_then(|dev| attention_rs::cuda_utils::sm_version(&dev))
+            })
             .map(|sm| sm >= 90)
             .unwrap_or(false)
     }
