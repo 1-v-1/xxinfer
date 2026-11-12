@@ -90,6 +90,13 @@ is unavailable on SM70; refusing to start a degraded configuration
 This is intended for deployments where throughput is a hard requirement and a
 fallback to software dequantization would violate the service contract.
 
+Note that the check is "NVFP4 weights on a GPU below SM100", so on a V100
+this switch refuses to start **every** NVFP4 model, whether or not the
+software path is fast enough.  The condition predates the software NVFP4
+kernels this branch adds; those kernels are what make NVFP4 viable on
+Volta in the first place.  Leave the switch unset on a V100 and read the
+report instead.
+
 ## Design notes
 
 ### Single source of truth
