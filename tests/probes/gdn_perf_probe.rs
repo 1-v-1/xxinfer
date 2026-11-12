@@ -20,6 +20,14 @@ const CONFIGS: &[(usize, usize, usize, usize, usize)] = &[
     (1, 16, 32, 128, 128),
     (4, 16, 32, 128, 128),
     (16, 16, 32, 128, 128),
+    // The state is 64 KiB per (batch, v-head), so a batch of 32 heads reaches
+    // 2 MiB and 256 heads reaches 16 MiB, which is past the 6 MiB L2 of a
+    // V100.  The two regimes behave differently and both matter.
+    (64, 16, 32, 128, 128),
+    (256, 16, 32, 128, 128),
+    // One head only: the floor of the kernel, i.e. the part that does not
+    // scale with the work.
+    (1, 1, 1, 128, 128),
 ];
 
 fn timed<F: FnMut() -> anyhow::Result<()>>(
@@ -60,7 +68,23 @@ fn main() -> anyhow::Result<()> {
     println!("| case | batch | k_heads | v_heads | k_dim | v_dim | ms |");
     println!("|---|---|---|---|---|---|---|");
 
-    for (batch, num_k_heads, num_v_heads, k_dim, v_dim) in CONFIGS {
+    // XINFER_GDN_PERF_BATCH restricts the run to one batch size, which keeps
+    // the kernel-level timings unambiguous when several are profiled together.
+    let only = std::env::var("XINFER_GDN_PERF_BATCH")
+        .ok()
+        .and_then(|v| v.parse::<usize>().ok());
+    let only_heads = std::env::var("XINFER_GDN_PERF_V_HEADS")
+        .ok()
+        .and_then(|v| v.parse::<usize>().ok());
+    let configs: Vec<&(usize, usize, usize, usize, usize)> = CONFIGS
+        .iter()
+        .filter(|(b, _, v, ..)| {
+            only.map_or(true, |want| *b == want)
+                && only_heads.map_or(true, |want| *v == want)
+        })
+        .collect();
+
+    for &(batch, num_k_heads, num_v_heads, k_dim, v_dim) in &configs {
         let q = Tensor::randn(0f32, 1f32, (*batch, *num_k_heads, *k_dim), &device)?
             .to_dtype(DType::BF16)?;
         let k = Tensor::randn(0f32, 1f32, (*batch, *num_k_heads, *k_dim), &device)?
