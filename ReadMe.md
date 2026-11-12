@@ -378,11 +378,9 @@ This fork carries a set of Volta-specific optimisations.  Install from the
 `perf/sm70-volta` branch and keep the `flashinfer` feature:
 
 ```bash
-export XINFER_REPO="https://github.com/1-v-1/xxinfer"
-git clone --branch perf/sm70-volta $XINFER_REPO
-cd xinfer
 # Drop `cutlass`: it targets SM100 and up.
-cargo install --path . --features cuda,nccl,flashinfer
+cargo install --git https://github.com/1-v-1/xxinfer.git \
+  --branch perf/sm70-volta xinfer --features cuda,nccl,flashinfer
 ```
 
 The engine kernels come from the matching fork of `attention.rs`, pinned by
