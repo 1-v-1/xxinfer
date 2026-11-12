@@ -20,15 +20,17 @@ use std::time::Instant;
 /// Shapes (m, n, k) for a 27B-class MoE model: the FFN projections dominate
 /// the NVFP4 GEMM share of the critical path.
 const SHAPES: &[(&str, usize, usize, usize)] = &[
-    ("decode_m1_n4096", 1, 4096, 4096),
-    ("decode_m8_n4096", 8, 4096, 4096),
-    ("decode_m32_n4096", 32, 4096, 4096),
+    // Decode: the shapes that decide the per-token latency.
+    ("decode_m1", 1, 4096, 4096),
+    ("decode_m4", 4, 4096, 4096),
+    ("decode_m8", 8, 4096, 4096),
+    ("decode_m16", 16, 4096, 4096),
+    ("decode_m32", 32, 4096, 4096),
     // Prefill: vary K to see whether the wmma path scales with the work or
-    // is dominated by per-k-step overhead.
-    ("prefill_m128_k4096", 128, 4096, 4096),
+    // is dominated by per-k-step overhead, and vary M for the tile shape.
+    ("prefill_m128", 128, 4096, 4096),
     ("prefill_m128_k8192", 128, 4096, 8192),
-    ("prefill_m128_k16384", 128, 4096, 16384),
-    ("prefill_m512_k4096", 512, 4096, 4096),
+    ("prefill_m512", 512, 4096, 4096),
 ];
 
 fn timed<F: FnMut() -> Result<(), candle_core::Error>>(
@@ -96,8 +98,8 @@ fn run_shapes(
     iters: usize,
     warmup: usize,
 ) -> anyhow::Result<()> {
-    println!("| case | m | n | k | ms | TFLOP/s |");
-    println!("|---|---|---|---|---|---|");
+    println!("| case | m | n | k | ms | TFLOP/s | GB/s |");
+    println!("|---|---|---|---|---|---|---|");
     for (name, m, n, k) in shapes.iter().copied() {
         let input = Tensor::randn(0f32, 1f32, (m, k), &device)?.to_dtype(dtype)?;
         // NVFP4 weights: [N, K/2] packed bytes plus [N, K/16] fp8 block scales.
@@ -128,7 +130,13 @@ fn run_shapes(
 
         let flops = 2.0 * (m as f64) * (n as f64) * (k as f64);
         let tflops = flops / (ms * 1e-3) / 1e12;
-        println!("| {name} | {m} | {n} | {k} | {ms:.4} | {tflops:.3} |");
+        // The weights are FP4, so a decode step moves K/2 bytes per output
+        // row plus one FP8 scale per 16 elements.
+        let bytes = (n as f64) * ((k as f64) / 2.0 + (k as f64) / 16.0);
+        let gbps = bytes / (ms * 1e-3) / 1e9;
+        println!(
+            "| {name} | {m} | {n} | {k} | {ms:.4} | {tflops:.3} | {gbps:.1} |"
+        );
     }
     Ok(())
 }

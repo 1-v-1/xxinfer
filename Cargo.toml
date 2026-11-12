@@ -132,6 +132,10 @@ name = "nvfp4_overhead_probe"
 path = "tests/probes/nvfp4_overhead_probe.rs"
 
 [[example]]
+name = "gdn_perf_probe"
+path = "tests/probes/gdn_perf_probe.rs"
+
+[[example]]
 name = "nvfp4_perf_probe"
 path = "tests/probes/nvfp4_perf_probe.rs"
 
