@@ -98,7 +98,7 @@ fn guided_decoding_requests<'a>(
 #[cfg(feature = "flashinfer")]
 fn flashinfer_skip_reason_text(
     config: &crate::utils::config::Config,
-    model_type: ModelType,
+    model_type: &ModelType,
     gqa_supported: bool,
 ) -> &'static str {
     if config.kvcache_dtype.is_turboquant() {
@@ -106,13 +106,13 @@ fn flashinfer_skip_reason_text(
     } else if config.kvcache_dtype.is_fp8_keys() && !attention_rs::has_flashinfer_fp8_e4m3() {
         "the build has no FlashInfer FP8 E4M3 support"
     } else if matches!(
-        model_type,
+        *model_type,
         ModelType::Gemma3 | ModelType::Gemma4
     ) {
         "Gemma models use heterogeneous head dimensions"
     } else if !gqa_supported {
         "the GQA group size is not supported by the FlashInfer kernels"
-    } else if matches!(model_type, ModelType::DeepSeekV4) {
+    } else if matches!(*model_type, ModelType::DeepSeekV4) {
         "DeepSeek V4 does not consume FlashInfer attention"
     } else {
         "not initialized"
@@ -801,7 +801,7 @@ impl ModelRunner {
                 inputs.flashinfer_skip_reason = if skip_flashinfer_init {
                     Some(flashinfer_skip_reason_text(
                         config,
-                        model_type,
+                        &model_type,
                         flashinfer_gqa_supported,
                     ))
                 } else {
