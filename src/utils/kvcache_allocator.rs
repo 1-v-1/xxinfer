@@ -773,7 +773,14 @@ impl KVCacheAllocator {
             };
 
         // Flash split-K workspace: per KV layer, 64 seqs × q_heads × 8 splits × (head_dim+2) × 4 bytes
-        let flash_splitk_bytes: u64 = if cfg!(feature = "flash") || cfg!(feature = "flashattn") {
+        //
+        // The split-K workspace belongs to the flash-attention kernels.  When
+        // the FlashInfer backend is in use those kernels do not run, so
+        // reserving the workspace would hand VRAM to a buffer that is never
+        // touched.
+        let flash_splitk_bytes: u64 = if !self.use_flashinfer_workspace
+            && (cfg!(feature = "flash") || cfg!(feature = "flashattn"))
+        {
             let q_heads_per_shard = self.num_attention_heads / self.num_shards.max(1);
             let splits = 8usize; // flash::NUM_SPLITS
                                  // One workspace per cache owner (Gemma4 KV-shared layers run on their producer's

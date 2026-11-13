@@ -568,6 +568,8 @@ pub fn run_runner_process(args: Vec<String>) -> anyhow::Result<()> {
                 })?,
             );
 
+            crate::utils::mem_report::log_device_memory("after the nccl init");
+
             #[cfg(not(feature = "nccl"))]
             let comm = Rc::new(Comm::default());
 
