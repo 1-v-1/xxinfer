@@ -174,24 +174,20 @@ where
     /// Create a *private* memory pool for graph capture.
     ///
     /// The previous implementation took the device's default pool
-    /// (`cuDeviceGetDefaultMemPool`) and pinned its release threshold to
-    /// `u64::MAX`, then made it the device's default pool.  That has two
-    /// problems:
+    /// (`cuDeviceGetDefaultMemPool`), pinned its release threshold to
+    /// `u64::MAX`, and then set it as the device's default pool again.  The
+    /// last step was a no-op: `cuDeviceGetDefaultMemPool` returns the pool
+    /// that is already the default, so the "capture pool" and the pool every
+    /// other allocation in the process goes through were the same pool.
     ///
-    /// 1. The pool is *process-wide*.  Once it is the device's default pool,
-    ///    every allocation the process makes afterwards -- prefill
-    ///    activations, temporary buffers, KV cache growth -- is served from
-    ///    it.
-    /// 2. `RELEASE_THRESHOLD = u64::MAX` means the pool never hands memory
-    ///    back to the driver.  `CUDA_GRAPH_INSTANTIATE_FLAG_AUTO_FREE_ON_LAUNCH`
-    ///    returns a graph's allocations to the *pool*, not to the driver, so
-    ///    that flag is defeated and the pool only ever grows.
+    /// The consequence was that the reported "graph pool usage" was really
+    /// the whole card: the model weights, the KV cache and the mamba states
+    /// all landed in it.  That number was then mistaken for the cost of the
+    /// CUDA graphs, which made the graphs look more expensive than the model.
     ///
-    /// Together those made the pool account for far more memory than the
-    /// graphs themselves need, and made it grow with unrelated allocations.
-    /// A private pool avoids the first problem: only the capture allocations
-    /// land in it, and it is detached from the device again once the capture
-    /// is done.  A finite release threshold avoids the second one.
+    /// A private pool fixes the accounting: only what the capture allocates
+    /// lands in it, and it is detached from the device again once the
+    /// capture is over.
     fn create_capture_pool(&self) -> Result<CUmemoryPool> {
         let mut pool: CUmemoryPool = ptr::null_mut();
         unsafe {
@@ -218,23 +214,22 @@ where
             *self.pool_handle.write() = Some(handle);
 
             // The release threshold is the amount of *unused* memory the pool
-            // keeps before it hands it back to the driver.  Pinning it to
-            // `u64::MAX` makes the pool grow without bound: the graphs are
-            // captured with `AUTO_FREE_ON_LAUNCH`, which returns a graph's
-            // allocations to the *pool* rather than to the driver, so the
-            // threshold is the only thing that can ever shrink the pool.
+            // keeps before it hands it back to the driver.
             //
-            // A zero threshold means the pool releases everything it does not
-            // currently have handed out.  The graph allocations stay live for
-            // as long as the graphs exist, because they are still allocated
-            // from the pool; what disappears is the slack the pool keeps
-            // around to satisfy the next allocation.
+            // The threshold is pinned to the maximum on purpose.  This pool
+            // holds the allocations of the captured graphs, and those stay
+            // live for as long as the graphs exist, so there is nothing to
+            // release anyway.  More importantly, the pool must not hand
+            // memory back between captures: the graphs refer to the
+            // addresses they were captured with, and a released address that
+            // gets reused by an unrelated allocation would corrupt a replay.
             //
-            // A small non-zero reserve is kept so that the repeated
-            // allocations of a decoding step do not force the driver into a
-            // `cudaMalloc`/`cudaFree` round trip on every launch.
-            const POOL_RESERVE_BYTES: u64 = 64 * 1024 * 1024;
-            let threshold: u64 = POOL_RESERVE_BYTES;
+            // Because the pool is private to the capture, a large threshold
+            // only affects the capture itself -- unlike the previous
+            // implementation, which pinned the *device default* pool and
+            // therefore changed the behaviour of every allocation in the
+            // process.
+            let threshold: u64 = u64::MAX;
             lib()
                 .cuMemPoolSetAttribute(
                     pool,
@@ -250,21 +245,31 @@ where
     }
 
     fn set_capture_mem_pool(&self) -> Result<()> {
-        if self.pool_handle.read().is_some() {
-            return Ok(());
-        }
-
         unsafe {
             let status = CudaGraph::capture_status(self.device.cu_stream().clone())?;
-            if status != CUstreamCaptureStatus::CU_STREAM_CAPTURE_STATUS_ACTIVE {
-                let pool = self.create_capture_pool()?;
-                lib()
-                    .cuDeviceSetMemPool(*self.device.cu_device(), pool)
-                    .result()
-                    .map_err(|e| {
-                        candle_core::Error::Msg(format!("cuDeviceSetMemPool failed: {e:?}"))
-                    })?;
+            if status == CUstreamCaptureStatus::CU_STREAM_CAPTURE_STATUS_ACTIVE {
+                // A capture is already in progress; the pool it uses is
+                // already the device's default pool.
+                return Ok(());
             }
+
+            // The pool is created once and then reused for every capture.
+            // It has to be re-installed as the device's default pool on each
+            // capture, because `restore_default_mem_pool` detaches it when
+            // the previous capture finished.  Without this, every capture
+            // after the first one would allocate outside the pool, and the
+            // pool usage would no longer describe what the graphs hold.
+            let pool = match *self.pool_handle.read() {
+                Some(handle) => handle as usize as *mut sys::CUmemPoolHandle_st,
+                None => self.create_capture_pool()?,
+            };
+
+            lib()
+                .cuDeviceSetMemPool(*self.device.cu_device(), pool)
+                .result()
+                .map_err(|e| {
+                    candle_core::Error::Msg(format!("cuDeviceSetMemPool failed: {e:?}"))
+                })?;
         }
 
         Ok(())
@@ -417,15 +422,46 @@ where
         )
     }
 
+    /// Report how much memory the CUDA graphs actually hold.
+    ///
+    /// The pool is private to the capture, so this is the real cost of the
+    /// graphs and nothing else.  The device's total and free memory are
+    /// printed next to it, because the previous implementation reported the
+    /// *device default* pool, which is every allocation in the process --
+    /// that made the graphs look like they held the whole card.
     fn report_graph_pool_usage(&self) -> Result<()> {
         let pool = self.get_current_mem_pool()?;
         let peak = Self::get_peak_memory_usage(pool)?;
         let current = Self::get_current_memory_usage(pool)?;
+
+        let (total, free) = {
+            let mut free_bytes: usize = 0;
+            let mut total_bytes: usize = 0;
+            unsafe {
+                let result = lib()
+                    .cuMemGetInfo(&mut free_bytes, &mut total_bytes)
+                    .result();
+                if result.is_err() {
+                    (0u64, 0u64)
+                } else {
+                    (total_bytes as u64, free_bytes as u64)
+                }
+            }
+        };
+
         println!(
             "CUDA graph capture pool usage: {:.2} MB (current), {:.2} MB (peak)",
             current as f64 / 1e6,
             peak as f64 / 1e6
         );
+        if total > 0 {
+            println!(
+                "  device memory: {:.2} GB total, {:.2} GB free => graphs hold {:.2}% of the card",
+                total as f64 / 1e9,
+                free as f64 / 1e9,
+                current as f64 / total as f64 * 100.0
+            );
+        }
         Ok(())
     }
 

@@ -228,11 +228,6 @@ pub struct KVCacheAllocator {
     /// Whether the CUTLASS kernels are actually used by the loaded model.
     /// When false, do not reserve the CUTLASS workspace.
     use_cutlass_workspace: bool,
-    /// Batch sizes that will be captured into CUDA graphs.
-    ///
-    /// The capture pool holds one set of allocations per captured batch size,
-    /// so the number of captured sizes is what drives its size.
-    graph_capture_batches: Vec<usize>,
 }
 
 /// Mirrors `skip_flashinfer_init` in `core/runner.rs`.
@@ -678,15 +673,6 @@ impl KVCacheAllocator {
             prefill_chunk_size: econfig.effective_prefill_chunk_size(),
             use_flashinfer_workspace: uses_flashinfer_workspace(econfig, config),
             use_cutlass_workspace: uses_cutlass_workspace(config),
-            // The device is not known when the planner is built, and the
-            // number of captured graphs is what drives the size of the
-            // capture pool.  Assume the worst case -- one graph per integer
-            // batch size up to 32 -- so the reserve is safe on every device.
-            // On SM70 the actual ladder is geometric, so the real pool ends
-            // up smaller than the reserve.
-            graph_capture_batches: crate::utils::graph::planned_graph_capture_batches(
-                econfig.max_num_seqs.unwrap_or(1),
-            ),
         }
     }
 
@@ -823,35 +809,6 @@ impl KVCacheAllocator {
             )
             .saturating_add(chunk - 1)
             / chunk
-    }
-
-    /// Memory to reserve for the CUDA graph capture pool.
-    ///
-    /// This is the joint budget that the KV cache allocation was missing:
-    /// the pool is created after the cache, so its size has to be taken out
-    /// of the budget up front.
-    ///
-    /// `XINFER_CUDAGRAPH_MEM_MIB` sets it explicitly, which is what
-    /// 1Cat-vLLM does with `VLLM_V2_CUDAGRAPH_MEM_MIB`.
-    fn cudagraph_reserve_bytes(&self, econfig: &EngineConfig) -> u64 {
-        if econfig.disable_cuda_graph {
-            return 0;
-        }
-        if let Ok(mib) = std::env::var("XINFER_CUDAGRAPH_MEM_MIB") {
-            if let Ok(v) = mib.parse::<u64>() {
-                return v * 1024 * 1024;
-            }
-        }
-        // The number of captured graphs is bounded by the request limit, and
-        // the graph capacity of a hybrid mamba model is smaller than the
-        // request count.
-        let graph_batch = self
-            .graph_capture_batches
-            .last()
-            .copied()
-            .unwrap_or(1)
-            .min(HYBRID_MAMBA_GRAPH_CAPTURE_MAX_BATCH);
-        self.cuda_graph_bytes(graph_batch, self.user_max_model_len.unwrap_or(0))
     }
 
     /// Estimate buffers retained by CUDA graph capture for a decode batch.
@@ -1015,39 +972,6 @@ impl KVCacheAllocator {
                 // has even been considered.
                 let mut kv_budget =
                     available_before_reserve.saturating_sub(workspace_budget.total_bytes);
-                // The CUDA graph capture pool is created *after* the KV cache
-                // has been allocated, so without an explicit reserve it eats
-                // into whatever is left over and the failure surfaces as an
-                // out-of-memory error inside the capture, long after the
-                // point where it could have been prevented.
-                //
-                // 1Cat-vLLM reserves the same way, before the cache is sized:
-                // `get_explicit_cudagraph_memory_reserve()` reads
-                // `VLLM_V2_CUDAGRAPH_MEM_MIB` and `plan()` subtracts it from
-                // the memory that is available for the cache.
-                //
-                // `XINFER_CUDAGRAPH_MEM_MIB` overrides the estimate here for
-                // the same reason.
-                let graph_reserve = self.cudagraph_reserve_bytes(econfig);
-                if graph_reserve > 0 {
-                    if graph_reserve > kv_budget {
-                        crate::log_warn!(
-                            "CUDA graph reserve {:.2} GB exceeds the remaining budget {:.2} GB; \
-                             disabling CUDA graphs to keep the KV cache usable",
-                            graph_reserve as f64 / SIZE_IN_GB,
-                            kv_budget as f64 / SIZE_IN_GB
-                        );
-                        econfig.disable_cuda_graph = true;
-                    } else {
-                        crate::log_warn!(
-                            "Reserving {:.2} GB for CUDA graph capture ({} graphs, batch sizes {:?})",
-                            graph_reserve as f64 / SIZE_IN_GB,
-                            self.graph_capture_batches.len(),
-                            self.graph_capture_batches
-                        );
-                        kv_budget = kv_budget.saturating_sub(graph_reserve);
-                    }
-                }
                 let mut mamba_budget = 0u64;
                 let mut mamba_budget_slots = 0usize;
                 let mut mamba_budget_enabled = false;
