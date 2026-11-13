@@ -741,8 +741,31 @@ impl NaiveMLP {
     }
 
     pub fn forward(&self, xs: &Tensor) -> Result<Tensor> {
+        let diag = std::env::var("XINFER_DIAG_NAN").map(|v| v == "1").unwrap_or(false);
+        let probe = |name: &str, t: &Tensor| {
+            if !diag {
+                return;
+            }
+            let v = t.to_dtype(candle_core::DType::F32).ok().and_then(|x| x.flatten_all().ok())
+                .and_then(|x| x.to_vec1::<f32>().ok());
+            if let Some(v) = v {
+                let mut nan = 0usize;
+                let mut inf = 0usize;
+                let mut mx = 0f32;
+                for x in &v {
+                    if x.is_nan() { nan += 1; }
+                    else if x.is_infinite() { inf += 1; }
+                    else { mx = mx.max(x.abs()); }
+                }
+                crate::log_info!("[diag][mlp.{name}] nan={nan} inf={inf} maxabs={mx} n={}", v.len());
+            }
+        };
         let gate_up = self.fc1.forward(xs)?;
+        probe("fc1", &gate_up);
         let down = self.act.forward(&gate_up)?;
-        self.fc2.forward(&down)
+        probe("act", &down);
+        let out = self.fc2.forward(&down)?;
+        probe("fc2", &out);
+        Ok(out)
     }
 }
