@@ -520,7 +520,12 @@ impl CustomOp1 for AllReduce {
                     .map_err(|e| nccl_err("all_reduce", e))?;
                 candle_core::CudaStorage::wrap_cuda_slice(dst, dev)
             }
-            dtype => candle_core::bail!("unsupported dtype {dtype:?}"),
+            dtype => candle_core::bail!(
+                "unsupported dtype {dtype:?} (all_reduce) shape={:?} start={} elem_count={}",
+                l.shape().dims(),
+                start_offset,
+                elem_count
+            ),
         };
         Ok((dst, l.shape().clone()))
     }
