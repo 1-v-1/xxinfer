@@ -219,12 +219,24 @@ pub struct KVCacheAllocator {
     num_attention_heads: usize,
     hidden_size: usize,
     moe_intermediate_size: usize,
+    /// The feed-forward width of the dense layers.
+    ///
+    /// The gate/up projection materialises a tensor of this width, so the
+    /// transient activation estimate has to use it rather than the hidden
+    /// size.
+    intermediate_size: usize,
     moe_num_experts_per_tok: usize,
     is_moe: bool,
     prefill_chunk_size: usize,
     /// Whether FlashInfer GPU workspace is actually initialized at runtime.
     /// When false, do not reserve FlashInfer memory in the KV-cache budget.
     use_flashinfer_workspace: bool,
+    /// Whether the CUDA graph workspace slot has to be reserved.
+    ///
+    /// The graph slot is a second copy of the FlashInfer plan workspace.
+    /// When CUDA graphs are disabled it is never allocated, so reserving it
+    /// would hand a few hundred megabytes to a slot that does not exist.
+    cuda_graph_enabled: bool,
     /// Whether the eager (non graph) FlashInfer workspace slot is skipped.
     ///
     /// On Volta the FlashInfer prefill kernels are unavailable, so the eager
@@ -725,10 +737,12 @@ impl KVCacheAllocator {
             num_attention_heads: config.num_attention_heads,
             hidden_size: config.hidden_size,
             moe_intermediate_size,
+            intermediate_size: config.intermediate_size,
             moe_num_experts_per_tok,
             is_moe,
             prefill_chunk_size: econfig.effective_prefill_chunk_size(),
             use_flashinfer_workspace: uses_flashinfer_workspace(econfig, config),
+            cuda_graph_enabled: !econfig.disable_cuda_graph,
             skip_eager_workspace: is_volta(),
             use_cutlass_workspace: uses_cutlass_workspace(config),
         }
@@ -766,7 +780,15 @@ impl KVCacheAllocator {
             } else {
                 attention_rs::workspace::workspace_gpu_bytes()
             };
-            let graph_bytes = attention_rs::workspace::workspace_gpu_bytes();
+            // The graph slot is a separate allocation that only exists when
+            // CUDA graphs are captured.  Reserving it while the graphs are
+            // disabled would take a second copy of the plan workspace out of
+            // the KV budget for nothing.
+            let graph_bytes = if self.cuda_graph_enabled {
+                attention_rs::workspace::workspace_gpu_bytes()
+            } else {
+                0
+            };
             (eager_bytes + graph_bytes) as u64
         } else {
             0
@@ -829,9 +851,15 @@ impl KVCacheAllocator {
         };
 
         // Transient activation overhead: largest intermediate tensor during forward pass.
-        // Approximately 2 × prefill_chunk_size × hidden_size × dtype_size (for gate+up projections).
+        //
+        // The gate/up projection produces a tensor of the feed-forward width,
+        // not of the hidden width: it concatenates two projections of
+        // `intermediate_size` each.  Sizing it with the hidden size
+        // under-reserves by the ratio between the two, which on this model is
+        // 17408 / 5120 = 3.4x.
+        let ff_width = self.intermediate_size.max(self.hidden_size);
         let transient_bytes =
-            (2 * self.prefill_chunk_size * self.hidden_size * self.model_dtype_size) as u64;
+            (2 * self.prefill_chunk_size * ff_width * self.model_dtype_size) as u64;
 
         // MLA prefill materializes large per-token tensors that are not part of
         // the generic transient estimate: absorbed Q [N, heads, kv_rank], Q_PE,
