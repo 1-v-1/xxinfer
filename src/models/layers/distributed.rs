@@ -1796,13 +1796,17 @@ impl VocabParallelEmbedding {
         let local = ids.broadcast_sub(&offset)?;
         let last = Tensor::from_slice(&[(self.rows - 1) as u32], (1,), dev)?
             .broadcast_as(ids.shape())?;
-        let in_range = local.broadcast_le(&last)?;
+        // The comparison produces a U8 flag, so it is brought back to the
+        // dtype of the ids before it multiplies them.
+        let in_range = local.broadcast_le(&last)?.to_dtype(ids.dtype())?;
         let local = in_range.broadcast_mul(&local)?;
 
         let looked_up = self.weight.index_select(&local, 0)?;
         // The rows that do not belong to this rank contribute nothing, so
-        // they are zeroed before the gather.
-        let mask = in_range.to_dtype(DType::F32)?;
+        // they are zeroed before the gather.  The mask takes the dtype of
+        // the embedding table: a multiplication needs both sides to have
+        // the same one.
+        let mask = in_range.to_dtype(looked_up.dtype())?;
         let mask = mask.unsqueeze(1)?;
         let looked_up = looked_up.mul(&mask)?;
 
