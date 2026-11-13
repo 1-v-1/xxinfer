@@ -439,7 +439,7 @@ where
             let mut total_bytes: usize = 0;
             unsafe {
                 let result = lib()
-                    .cuMemGetInfo(&mut free_bytes, &mut total_bytes)
+                    .cuMemGetInfo_v2(&mut free_bytes, &mut total_bytes)
                     .result();
                 if result.is_err() {
                     (0u64, 0u64)
@@ -720,9 +720,7 @@ impl<M: CudaGraphModule> GraphCapturer<M> {
         // starts, so it comes from the device's default pool.
         #[cfg(feature = "flashinfer")]
         if let Device::Cuda(cuda_device) = device {
-            attention_rs::workspace::preallocate_graph_workspace(
-                &cuda_device.cuda_device(),
-            )?;
+            attention_rs::workspace::preallocate_graph_workspace(cuda_device)?;
         }
 
         let input_ids = Tensor::zeros((max_bs,), DType::U32, device)?;
@@ -1084,9 +1082,7 @@ impl<M: CudaGraphModule> GraphCapturer<M> {
         // could never be released.
         #[cfg(feature = "flashinfer")]
         if let Device::Cuda(cuda_device) = device {
-            attention_rs::workspace::preallocate_graph_workspace(
-                &cuda_device.cuda_device(),
-            )?;
+            attention_rs::workspace::preallocate_graph_workspace(cuda_device)?;
         }
 
         // Capture must use in-bounds, decode-consistent page metadata. Zeroed
