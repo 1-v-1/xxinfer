@@ -704,11 +704,16 @@ impl MLP {
                 };
                 let mut gate_shape = leading.clone();
                 gate_shape.push(m.n);
+                probe!("gate_up", &gate_up);
                 let gate = gate_up.narrow(1, 0, m.n)?.reshape(gate_shape.clone())?;
                 let up = gate_up.narrow(1, m.n, m.n)?.reshape(gate_shape)?;
+                probe!("gate", &gate);
+                probe!("up", &up);
                 (gate, up)
             }
         };
+        probe!("gate_after", &gate);
+        probe!("up_after", &up);
         let activated = if self.swiglu_limit > 0.0 && matches!(self.activation, Activation::Silu) {
             // DeepSeek V4's reference Expert promotes both projections to
             // FP32, clamps asymmetrically (gate <= limit, up in [-limit,
@@ -724,7 +729,10 @@ impl MLP {
         } else {
             (self.activation.forward(&gate)? * up)?
         };
-        self.down_proj.forward(&activated)
+        probe!("activated", &activated);
+        let out = self.down_proj.forward(&activated)?;
+        probe!("down", &out);
+        Ok(out)
     }
 }
 
