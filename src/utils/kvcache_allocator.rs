@@ -757,10 +757,17 @@ impl KVCacheAllocator {
         // the CUTLASS kernels are not compiled in, and a stale number here
         // would reserve VRAM that is never allocated.
         let flashinfer_bytes: u64 = if self.use_flashinfer_workspace {
-            // On Volta the eager slot is not allocated: the FlashInfer
-            // prefill kernels need SM80, so only the graph slot is used.
-            let slots = if self.skip_eager_workspace { 1 } else { 2 };
-            (attention_rs::workspace::workspace_gpu_bytes() * slots) as u64
+            // On Volta the eager slot exists, but with a reduced float
+            // buffer: the FlashInfer prefill kernels need SM80, so the
+            // prefill plan never runs, while the decode plan still needs
+            // the int buffer and the page-locked host buffer.
+            let eager_bytes = if self.skip_eager_workspace {
+                attention_rs::workspace::sm70_eager_workspace_gpu_bytes()
+            } else {
+                attention_rs::workspace::workspace_gpu_bytes()
+            };
+            let graph_bytes = attention_rs::workspace::workspace_gpu_bytes();
+            (eager_bytes + graph_bytes) as u64
         } else {
             0
         };
