@@ -841,7 +841,7 @@ impl Qwen3VLForConditionalGeneration {
     pub fn embed_weight(&self) -> Option<candle_core::Tensor> {
         match &self.text_model {
             Qwen3TextModel::Dense35(m) => Some(m.embed_weight()),
-            Qwen3TextModel::MoE35(m) => Some(m.embed_weight()),
+            Qwen3TextModel::MoE35(m) => Some(m.embed_weight().clone()),
             _ => None,
         }
     }
