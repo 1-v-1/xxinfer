@@ -172,18 +172,59 @@ M=22 N=5120  K=8704  max_abs_diff=2.441406e-4  mismatched=0/112640
 
 ---
 
-## 6. 使用方式
+## 6. 使用方式与环境变量
+
+### 6.1 必需
+
+**没有必需的新环境变量。** SM70 路径是**自动启用**的：运行时检测
+`sm_version(dev) == 70` 即切换，无需任何配置。
+
+唯一仍需在 V100 上设置的是既有的这个（与本次移植无关，Dockerfile 已内置）：
 
 ```bash
 export ENABLE_FLASHINFER_SOFTWARE_FP8=1
-export XINFER_NVFP4_SM70_HMMA884=1   # 默认在 SM70 上自动启用；=0 强制回退软件路径
-export XINFER_NVFP4_SM70_CHECK=1     # 可选：数值自检（会拖慢，仅验证用）
 ```
 
-选择条件（`use_sm70_hmma884`）：`sm_version(dev) == 70` 且 `dtype == F16`
-且 `k % 16 == 0` 且 `weight_scale_swizzled.is_none()`。
+V100（SM70）没有 FP8 硬件转换，这个开关打开 FlashInfer 的软件 FP8 E4M3
+KV cache 路径。**注意它是编译期开关**（`build.rs` 读环境变量决定
+`-D` 宏），设了但不重新编译是无效的。
+
+### 6.2 可选
+
+| 变量 | 默认 | 作用 |
+|---|---|---|
+| `XINFER_NVFP4_SM70_HMMA884=0` | 未设（=启用） | 强制回退通用软件路径，用于同一模型上 A/B 对比 Volta kernel 与 fallback，不必重新编译 |
+| `XINFER_NVFP4_SM70_CHECK=1` | 未设（=关闭） | 打开数值自检：额外跑一遍软件 GEMM 并打印最大绝对/相对差与不一致计数。**每个 NVFP4 GEMM 的成本约翻倍**，只用于验证运行 |
+
+### 6.3 选择条件
+
+SM70 路径生效需同时满足（`use_sm70_hmma884`）：
+
+- `sm_version(dev) == 70`
+- `dtype == DType::F16`
+- `k % 16 == 0`
+- `weight_scale_swizzled.is_none()`
+
+任一不满足则回退通用软件反量化路径。
 
 `input_scale` 在 SM70 路径被有意忽略（激活保持 FP16），与软件路径一致。
+
+### 6.4 其他已有变量（本次未改动，仅供参考）
+
+| 变量 | 作用 |
+|---|---|
+| `XINFER_NVFP4_FORCE_LUT=1` | 软件路径强制用高精度 LUT 反量化（Blackwell 上默认走硬件 FP4 intrinsics） |
+| `XINFER_NVFP4_ONLINE_SCALE=1` | 在线计算 input scale，默认关闭 |
+
+### 6.5 编译期调优开关（attention.rs 的 build.rs）
+
+这些会改变 kernel 的 tile 形状，**仅在测量时使用**，且需重新编译：
+
+| 变量 | 作用 |
+|---|---|
+| `NVFP4_DECODE_BLOCK_ROWS` / `NVFP4_DECODE_BLOCK_ROWS_BATCH` | 软件解码路径每 block 覆盖的输出列数 |
+| `NVFP4_DECODE_DUAL_ROW` | 软件解码路径一个 warp 覆盖一个还是两个输出列 |
+| `NVFP4_WMMA_BM` / `NVFP4_WMMA_BN` / `NVFP4_WMMA_BK` | WMMA 路径的 tile 形状（BM=64, BN=64, BK=16） |
 
 ---
 
