@@ -1841,7 +1841,6 @@ impl ModelRunner {
         // Diagnostic: the sampled text comes out empty, so look at what the
         // logits actually hold.
         {
-            use candle_core::TensorExt;
             let dims = logits.dims().to_vec();
             let stats = logits
                 .flatten_all()
