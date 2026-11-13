@@ -1839,8 +1839,10 @@ impl ModelRunner {
             logits.to_dtype(DType::F32)?
         };
         // Diagnostic: the sampled text comes out empty, so look at what the
-        // logits actually hold.
-        {
+        // logits actually hold.  The copy back to the host synchronises with
+        // the device, which is illegal while a CUDA graph is being captured,
+        // so it only runs when it is asked for.
+        if std::env::var("XINFER_DIAG_LOGITS").is_ok() {
             let dims = logits.dims().to_vec();
             let stats = logits
                 .flatten_all()

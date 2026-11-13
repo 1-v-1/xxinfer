@@ -150,22 +150,7 @@ impl Qwen3_5DecoderLayer {
         let residual = xs;
         let xs = self.input_layernorm.forward(xs)?;
 
-        // Diagnostic: find which part of the layer produces the infinities.
-        let diag = std::env::var("XINFER_DIAG_NAN").map(|v| v == "1").unwrap_or(false);
-        if diag {
-            let v = xs.to_dtype(candle_core::DType::F32)?.to_vec2::<f32>().ok();
-            if let Some(rows) = v {
-                let mut nan = 0usize;
-                let mut inf = 0usize;
-                let mut mx = 0f32;
-                for row in rows.iter().flatten() {
-                    if row.is_nan() { nan += 1; }
-                    else if row.is_infinite() { inf += 1; }
-                    else { mx = mx.max(row.abs()); }
-                }
-                crate::log_info!("[diag][layernorm] nan={nan} inf={inf} maxabs={mx}");
-            }
-        }
+        
 
         let attn_output = match &self.attn {
             Qwen3_5AttnType::FullAttention(attn) => {
@@ -184,20 +169,7 @@ impl Qwen3_5DecoderLayer {
             }
         };
 
-        if diag {
-            let v = attn_output.to_dtype(candle_core::DType::F32)?.to_vec2::<f32>().ok();
-            if let Some(rows) = v {
-                let mut nan = 0usize;
-                let mut inf = 0usize;
-                let mut mx = 0f32;
-                for row in rows.iter().flatten() {
-                    if row.is_nan() { nan += 1; }
-                    else if row.is_infinite() { inf += 1; }
-                    else { mx = mx.max(row.abs()); }
-                }
-                crate::log_info!("[diag][attn] nan={nan} inf={inf} maxabs={mx}");
-            }
-        }
+        
 
         // Fused residual add + RMSNorm: same rounding as `(attn + residual)`
         // followed by the norm, but one kernel instead of four.
@@ -206,20 +178,7 @@ impl Qwen3_5DecoderLayer {
             .forward_add(&attn_output, residual)?;
         let mlp_output = self.mlp.forward(&xs)?;
 
-        if diag {
-            let v = mlp_output.to_dtype(candle_core::DType::F32)?.to_vec2::<f32>().ok();
-            if let Some(rows) = v {
-                let mut nan = 0usize;
-                let mut inf = 0usize;
-                let mut mx = 0f32;
-                for row in rows.iter().flatten() {
-                    if row.is_nan() { nan += 1; }
-                    else if row.is_infinite() { inf += 1; }
-                    else { mx = mx.max(row.abs()); }
-                }
-                crate::log_info!("[diag][mlp] nan={nan} inf={inf} maxabs={mx}");
-            }
-        }
+        
 
         &residual + mlp_output
     }
@@ -674,30 +633,6 @@ impl Qwen3_5ForCausalLM {
             *collected_layers = Some(vec![xs.clone()]);
         }
 
-        // Diagnostic: the logits come out as NaN, so check the embedding
-        // output first.
-        if std::env::var("XINFER_DIAG_NAN").map(|v| v == "1").unwrap_or(false) {
-            let v = xs.to_dtype(candle_core::DType::F32)?.to_vec2::<f32>().ok();
-            if let Some(rows) = v {
-                let mut nan = 0usize;
-                let mut inf = 0usize;
-                let mut mx = 0f32;
-                for row in rows.iter().flatten() {
-                    if row.is_nan() {
-                        nan += 1;
-                    } else if row.is_infinite() {
-                        inf += 1;
-                    } else {
-                        mx = mx.max(row.abs());
-                    }
-                }
-                crate::log_info!(
-                    "[diag][embed] nan={nan} inf={inf} maxabs={mx} elems={}",
-                    rows.iter().map(|r| r.len()).sum::<usize>()
-                );
-            }
-        }
-
         let mut kv_cache_idx = 0usize;
         let seq_slots = self.resolve_seq_slots(input_metadata, xs.dim(0)?)?;
         let mut mamba_cache = self.mamba_cache.write();
@@ -724,36 +659,6 @@ impl Qwen3_5ForCausalLM {
                 &mut mamba_cache,
                 &seq_slots,
             )?;
-
-            // Diagnostic: the logits come out as NaN, so find the first layer
-            // that produces them.
-            if std::env::var("XINFER_DIAG_NAN").map(|v| v == "1").unwrap_or(false) {
-                let v = xs.to_dtype(candle_core::DType::F32)?.to_vec2::<f32>().ok();
-                if let Some(rows) = v {
-                    let mut nan = 0usize;
-                    let mut inf = 0usize;
-                    let mut mx = 0f32;
-                    for row in rows.iter().flatten() {
-                        if row.is_nan() {
-                            nan += 1;
-                        } else if row.is_infinite() {
-                            inf += 1;
-                        } else {
-                            mx = mx.max(row.abs());
-                        }
-                    }
-                    if nan > 0 || inf > 0 {
-                        crate::log_info!(
-                            "[diag][layer {i}] nan={nan} inf={inf} maxabs={mx} elems={}",
-                            rows.iter().map(|r| r.len()).sum::<usize>()
-                        );
-                        // The first bad layer is the interesting one.
-                        return Err(candle_core::Error::Msg(
-                            format!("[diag] NaN appeared at layer {i}")
-                        ));
-                    }
-                }
-            }
 
             if let (Some(layer_ids), Some(layers)) = (collect_layer_ids, collected_layers.as_mut())
             {
