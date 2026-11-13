@@ -4,7 +4,8 @@ use crate::models::layers::linear::set_linear_is_prefill;
 use attention_rs::InputMetadata;
 use candle_core::cuda_backend::cudarc::driver::sys;
 use candle_core::cuda_backend::cudarc::driver::sys::{
-    lib, CUgraphInstantiate_flags, CUmemPool_attribute, CUmemoryPool, CUstreamCaptureMode,
+    lib, CUgraphInstantiate_flags, CUmemAllocationHandleType, CUmemAllocationType, CUmemLocation,
+    CUmemLocationType, CUmemPool_attribute, CUmemPoolProps, CUmemoryPool, CUstreamCaptureMode,
     CUstreamCaptureStatus,
 };
 use candle_core::cuda_backend::CudaDevice;
@@ -98,6 +99,9 @@ pub trait CudaGraphModule {
         embeded_inputs: bool,
     ) -> Result<Tensor>;
     fn report_graph_pool_usage(&self) -> Result<()>;
+
+    /// Detach the capture pool from the device once the capture is over.
+    fn restore_default_mem_pool(&self) -> Result<()>;
 }
 
 pub struct CudaGraphHandle {
@@ -167,20 +171,70 @@ where
         }
     }
 
+    /// Create a *private* memory pool for graph capture.
+    ///
+    /// The previous implementation took the device's default pool
+    /// (`cuDeviceGetDefaultMemPool`) and pinned its release threshold to
+    /// `u64::MAX`, then made it the device's default pool.  That has two
+    /// problems:
+    ///
+    /// 1. The pool is *process-wide*.  Once it is the device's default pool,
+    ///    every allocation the process makes afterwards -- prefill
+    ///    activations, temporary buffers, KV cache growth -- is served from
+    ///    it.
+    /// 2. `RELEASE_THRESHOLD = u64::MAX` means the pool never hands memory
+    ///    back to the driver.  `CUDA_GRAPH_INSTANTIATE_FLAG_AUTO_FREE_ON_LAUNCH`
+    ///    returns a graph's allocations to the *pool*, not to the driver, so
+    ///    that flag is defeated and the pool only ever grows.
+    ///
+    /// Together those made the pool account for far more memory than the
+    /// graphs themselves need, and made it grow with unrelated allocations.
+    /// A private pool avoids the first problem: only the capture allocations
+    /// land in it, and it is detached from the device again once the capture
+    /// is done.  A finite release threshold avoids the second one.
     fn create_capture_pool(&self) -> Result<CUmemoryPool> {
         let mut pool: CUmemoryPool = ptr::null_mut();
         unsafe {
+            // `CUmemPoolProps` grew fields across CUDA releases, so start from
+            // the default and only set the ones that matter.  The release
+            // threshold is applied separately with `cuMemPoolSetAttribute`.
+            let props = CUmemPoolProps {
+                allocType: CUmemAllocationType::CU_MEM_ALLOCATION_TYPE_PINNED,
+                handleTypes: CUmemAllocationHandleType::CU_MEM_HANDLE_TYPE_NONE,
+                location: CUmemLocation {
+                    type_: CUmemLocationType::CU_MEM_LOCATION_TYPE_DEVICE,
+                    id: *self.device.cu_device() as i32,
+                },
+                ..Default::default()
+            };
             lib()
-                .cuDeviceGetDefaultMemPool(&mut pool, *self.device.cu_device())
+                .cuMemPoolCreate(&mut pool, &props)
                 .result()
                 .map_err(|e| {
-                    candle_core::Error::Msg(format!("cuDeviceGetDefaultMemPool failed: {e:?}"))
+                    candle_core::Error::Msg(format!("cuMemPoolCreate failed: {e:?}"))
                 })?;
 
             let handle = pool as *mut std::ffi::c_void as usize as i64;
             *self.pool_handle.write() = Some(handle);
 
-            let threshold: u64 = u64::MAX;
+            // The release threshold is the amount of *unused* memory the pool
+            // keeps before it hands it back to the driver.  Pinning it to
+            // `u64::MAX` makes the pool grow without bound: the graphs are
+            // captured with `AUTO_FREE_ON_LAUNCH`, which returns a graph's
+            // allocations to the *pool* rather than to the driver, so the
+            // threshold is the only thing that can ever shrink the pool.
+            //
+            // A zero threshold means the pool releases everything it does not
+            // currently have handed out.  The graph allocations stay live for
+            // as long as the graphs exist, because they are still allocated
+            // from the pool; what disappears is the slack the pool keeps
+            // around to satisfy the next allocation.
+            //
+            // A small non-zero reserve is kept so that the repeated
+            // allocations of a decoding step do not force the driver into a
+            // `cudaMalloc`/`cudaFree` round trip on every launch.
+            const POOL_RESERVE_BYTES: u64 = 64 * 1024 * 1024;
+            let threshold: u64 = POOL_RESERVE_BYTES;
             lib()
                 .cuMemPoolSetAttribute(
                     pool,
@@ -206,6 +260,42 @@ where
                 let pool = self.create_capture_pool()?;
                 lib()
                     .cuDeviceSetMemPool(*self.device.cu_device(), pool)
+                    .result()
+                    .map_err(|e| {
+                        candle_core::Error::Msg(format!("cuDeviceSetMemPool failed: {e:?}"))
+                    })?;
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Detach the capture pool from the device once the capture is over.
+    ///
+    /// The graphs keep referring to the pool they were captured in, so the
+    /// pool has to stay alive -- but it must not remain the device's *default*
+    /// pool, or every later allocation in the process would be served from it
+    /// and would keep the pool from ever shrinking.
+    fn restore_default_mem_pool(&self) -> Result<()> {
+        let handle = match *self.pool_handle.read() {
+            Some(h) => h,
+            None => return Ok(()),
+        };
+
+        unsafe {
+            let mut default_pool: CUmemoryPool = ptr::null_mut();
+            lib()
+                .cuDeviceGetDefaultMemPool(&mut default_pool, *self.device.cu_device())
+                .result()
+                .map_err(|e| {
+                    candle_core::Error::Msg(format!("cuDeviceGetDefaultMemPool failed: {e:?}"))
+                })?;
+
+            // The device default pool is never the private capture pool, but
+            // guard against restoring the pool we are trying to detach.
+            if default_pool as *mut std::ffi::c_void as usize as i64 != handle {
+                lib()
+                    .cuDeviceSetMemPool(*self.device.cu_device(), default_pool)
                     .result()
                     .map_err(|e| {
                         candle_core::Error::Msg(format!("cuDeviceSetMemPool failed: {e:?}"))
@@ -332,11 +422,15 @@ where
         let peak = Self::get_peak_memory_usage(pool)?;
         let current = Self::get_current_memory_usage(pool)?;
         println!(
-            "Default pool usage: {:.2} MB (current), {:.2} MB (peak)",
+            "CUDA graph capture pool usage: {:.2} MB (current), {:.2} MB (peak)",
             current as f64 / 1e6,
             peak as f64 / 1e6
         );
         Ok(())
+    }
+
+    fn restore_default_mem_pool(&self) -> Result<()> {
+        CudaGraphWrapper::restore_default_mem_pool(self)
     }
 }
 
@@ -419,6 +513,74 @@ pub fn planned_graph_capture_batches(max_num_seqs: usize) -> Vec<usize> {
     (1..=max_num_seqs.clamp(1, 32)).collect()
 }
 
+/// Batch sizes to capture when the device cannot afford one graph per
+/// integer batch size.
+///
+/// Each captured graph holds its own set of intermediates in the capture
+/// memory pool, and none of them are released, so the pool grows with the
+/// number of captured sizes.  On a 16 GB card that is the difference between
+/// a few hundred megabytes and several gigabytes.
+///
+/// Replay picks the smallest captured size that is at least the live batch
+/// size (`captured_bs.iter().find(|&&x| x >= bs)`), so a geometric ladder
+/// covers every batch size with a handful of graphs.  The only cost is that
+/// a batch of 3 replays the graph captured for 4, which wastes a little
+/// compute.
+pub fn sparse_graph_capture_batches(max_num_seqs: usize) -> Vec<usize> {
+    let cap = max_num_seqs.clamp(1, 32);
+    let mut sizes = Vec::new();
+    let mut s = 1usize;
+    while s <= cap {
+        sizes.push(s);
+        if s == cap {
+            break;
+        }
+        s = s.saturating_mul(2);
+    }
+    // Always include the exact maximum: replay needs a size >= the live
+    // batch, and the largest live batch is the maximum.
+    if *sizes.last().unwrap_or(&0) != cap {
+        sizes.push(cap);
+    }
+    sizes.sort_unstable();
+    sizes.dedup();
+    sizes
+}
+
+/// Pick the capture batch sizes for a device.
+///
+/// Volta (SM70) and Turing (SM75) have 16 GB or less of memory per card and
+/// no FP4 tensor cores, so the decode path is already close to the memory
+/// limit.  Capturing one graph per integer batch size there costs gigabytes
+/// of capture-pool memory that the KV cache needs far more.
+///
+/// Turing is excluded on purpose: its FP8 tensor cores change the shape of
+/// the decode path enough that the Volta measurements do not carry over.
+#[cfg(feature = "cuda")]
+pub fn graph_capture_batches_for_device(max_num_seqs: usize, device: &Device) -> Vec<usize> {
+    let sm = match device {
+        Device::Cuda(cuda_device) => {
+            let inner = cuda_device.cuda_device();
+            attention_rs::cuda_utils::sm_version(&inner)
+        }
+        _ => None,
+    };
+
+    if sm == Some(70) {
+        let sizes = sparse_graph_capture_batches(max_num_seqs);
+        crate::log_warn!(
+            "SM70 detected: capturing {} batch sizes {:?} instead of every size up to {} \
+             to keep the CUDA graph memory pool small",
+            sizes.len(),
+            sizes,
+            max_num_seqs
+        );
+        sizes
+    } else {
+        planned_graph_capture_batches(max_num_seqs)
+    }
+}
+
 #[cfg(feature = "flashinfer")]
 fn graph_decode_plan(
     device: &Device,
@@ -499,8 +661,33 @@ impl<M: CudaGraphModule> GraphCapturer<M> {
         );
         let _prefill_guard = set_linear_is_prefill(false);
         self.device = Some(device.clone());
+
+        // The device is only known here, so this is where the capture sizes
+        // are chosen: on SM70 a geometric ladder instead of every integer
+        // batch size, to keep the capture memory pool small.
+        #[cfg(feature = "cuda")]
+        {
+            let for_device = graph_capture_batches_for_device(self.max_num_seqs, device);
+            if for_device != self.graph_bs {
+                self.graph_bs = for_device;
+            }
+        }
+
         let max_bs = self.graph_bs[self.graph_bs.len() - 1];
         let max_num_blocks = (self.max_model_len + self.block_size - 1) / self.block_size;
+
+        // The decode graph needs its own plan workspace, because the
+        // addresses it hands out have to stay stable across replays.  If it
+        // were created on first use it would be created *inside* the capture
+        // and would come out of the capture's memory pool, where it could
+        // never be released again.  Create it here, before the capture
+        // starts, so it comes from the device's default pool.
+        #[cfg(feature = "flashinfer")]
+        if let Device::Cuda(cuda_device) = device {
+            attention_rs::workspace::preallocate_graph_workspace(
+                &cuda_device.cuda_device(),
+            )?;
+        }
 
         let input_ids = Tensor::zeros((max_bs,), DType::U32, device)?;
         let positions = Tensor::zeros((max_bs,), DType::I64, device)?;
@@ -665,6 +852,12 @@ impl<M: CudaGraphModule> GraphCapturer<M> {
             #[cfg(feature = "cuda")]
             device.synchronize()?;
         }
+
+        // The graphs keep referring to the capture pool, so the pool stays
+        // alive -- but it must stop being the device's default pool, or every
+        // later allocation in the process would be served from it and would
+        // never be returned to the driver.
+        self.model.restore_default_mem_pool()?;
         let _ = self.model.report_graph_pool_usage();
         crate::log_warn!("Captured batches {:?}", outputs.keys());
         self.graph_vars = Some(GraphCaptureVars {
@@ -849,6 +1042,16 @@ impl<M: CudaGraphModule> GraphCapturer<M> {
         self.device = Some(device.clone());
         let verify_len = mtp_num_speculative + 1;
         let max_num_blocks = (self.max_model_len + self.block_size - 1) / self.block_size;
+
+        // See `capture`: the graph plan workspace must not be created inside
+        // the capture, or it would be served from the capture memory pool and
+        // could never be released.
+        #[cfg(feature = "flashinfer")]
+        if let Device::Cuda(cuda_device) = device {
+            attention_rs::workspace::preallocate_graph_workspace(
+                &cuda_device.cuda_device(),
+            )?;
+        }
 
         // Capture must use in-bounds, decode-consistent page metadata. Zeroed
         // cu_seqlens / last_len=max_model_len previously caused FlashInfer/GDN

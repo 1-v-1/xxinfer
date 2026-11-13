@@ -76,11 +76,20 @@ impl AccelerationReport {
     /// On such a device NVFP4 is usually a net loss: the weights occupy a
     /// quarter of the memory, but the GEMM does strictly more work than a
     /// plain F16 GEMM because each 4-bit weight is expanded at runtime.
+    /// NVFP4 is degraded only when there is no accelerated 4-bit path at all.
+    ///
+    /// SM70 (Volta) has no FP4 tensor cores, but the ported
+    /// `nvfp4_sm70_hmma884_kernel` decodes the 4-bit weights to FP16
+    /// in-register and runs them through the native `mma.m8n8k4` (HMMA.884)
+    /// tensor-core sequence -- a W4A16 path that uses the FP16 tensor cores.
+    /// That is a genuine acceleration, so it must not be reported as
+    /// degraded.  SM75/80/90 without FP4 tensor cores (only SM100+ has them)
+    /// still fall back to the slow software-dequantization path.
     pub fn nvfp4_is_degraded(&self) -> bool {
         self.uses_nvfp4_weights
             && self
                 .compute_capability
-                .map(|cc| cc < 100)
+                .map(|cc| cc < 100 && cc != 70)
                 .unwrap_or(false)
     }
 
@@ -294,8 +303,17 @@ pub fn build_report(inputs: ReportInputs<'_>) -> AccelerationReport {
     // --- NVFP4 / FP4 GEMM -----------------------------------------------
     let cc = inputs.compute_capability;
     let hardware_fp4 = cc.map(|cc| cc >= 100).unwrap_or(false);
+    // SM70 (Volta) has no FP4 tensor cores, but it does have FP16 tensor
+    // cores.  The ported `nvfp4_sm70_hmma884_kernel` decodes the 4-bit
+    // weights to FP16 in-register and feeds them to an `mma.m8n8k4`
+    // (HMMA.884) sequence, i.e. W4A16 through the native tensor-core path.
+    // That is a real acceleration over a plain F16 GEMM, not the slow
+    // software-dequantization path the old report described.
+    let sm70_hmma884 = cc.map(|cc| cc == 70).unwrap_or(false);
     if inputs.uses_nvfp4_weights {
         if hardware_fp4 {
+            entries.push(CapabilityEntry::enabled("nvfp4_hardware_gemm"));
+        } else if sm70_hmma884 {
             entries.push(CapabilityEntry::enabled("nvfp4_hardware_gemm"));
         } else {
             entries.push(CapabilityEntry::disabled(
