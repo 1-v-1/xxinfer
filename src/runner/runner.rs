@@ -103,6 +103,8 @@ pub fn run_runner() -> anyhow::Result<()> {
             #[cfg(not(feature = "nccl"))]
             let comm = Rc::new(Comm::default());
 
+            crate::utils::mem_report::log_device_memory("after the nccl init");
+
             xinfer::log_info!("Loading model at rank {}", init_req.rank);
 
             let progress_sock_name = format!("{}@xinfer-progress", uuid_str);

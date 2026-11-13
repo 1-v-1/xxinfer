@@ -225,6 +225,11 @@ pub struct KVCacheAllocator {
     /// Whether FlashInfer GPU workspace is actually initialized at runtime.
     /// When false, do not reserve FlashInfer memory in the KV-cache budget.
     use_flashinfer_workspace: bool,
+    /// Whether the eager (non graph) FlashInfer workspace slot is skipped.
+    ///
+    /// On Volta the FlashInfer prefill kernels are unavailable, so the eager
+    /// slot has no consumer and the workspace does not allocate it.
+    skip_eager_workspace: bool,
     /// Whether the CUTLASS kernels are actually used by the loaded model.
     /// When false, do not reserve the CUTLASS workspace.
     use_cutlass_workspace: bool,
@@ -326,6 +331,29 @@ fn uses_cutlass_workspace(config: &Config) -> bool {
                     .and_then(|dev| attention_rs::cuda_utils::sm_version(&dev))
             })
             .map(|sm| sm >= 90)
+            .unwrap_or(false)
+    }
+    #[cfg(not(feature = "cuda"))]
+    {
+        false
+    }
+}
+
+/// Whether the first CUDA device is a Volta (SM70).
+///
+/// The FlashInfer prefill kernels need the `cp.async` of SM80, so on Volta
+/// the eager workspace slot has no consumer.
+fn is_volta() -> bool {
+    #[cfg(feature = "cuda")]
+    {
+        candle_core::Device::cuda_if_available(0)
+            .ok()
+            .and_then(|d| {
+                d.as_cuda_device()
+                    .ok()
+                    .and_then(|dev| attention_rs::cuda_utils::sm_version(&dev))
+            })
+            .map(|sm| sm == 70)
             .unwrap_or(false)
     }
     #[cfg(not(feature = "cuda"))]
@@ -672,6 +700,7 @@ impl KVCacheAllocator {
             is_moe,
             prefill_chunk_size: econfig.effective_prefill_chunk_size(),
             use_flashinfer_workspace: uses_flashinfer_workspace(econfig, config),
+            skip_eager_workspace: is_volta(),
             use_cutlass_workspace: uses_cutlass_workspace(config),
         }
     }
@@ -690,11 +719,19 @@ impl KVCacheAllocator {
     /// calculation that accounts for all known persistent and transient GPU
     /// memory consumers that are not tracked in KV cache or mamba budgets.
     pub fn compute_workspace_budget(&self) -> GpuMemoryBudget {
-        // FlashInfer workspace: 512 MiB float + 128 MiB int (GPU) + 128 MiB pinned host (not GPU)
-        // Graph capture duplicates the GPU buffers, but those are tracked separately.
-        // Only reserve when FlashInfer is actually initialized (not skipped for V4, Gemma, etc.).
+        // FlashInfer workspace: the float and int buffers of one slot, and
+        // a second set for the CUDA graph capture.  The pinned host buffer
+        // is not on the device.
+        //
+        // The size is taken from the workspace itself rather than repeated
+        // here: the float buffer only holds the FlashInfer plan region when
+        // the CUTLASS kernels are not compiled in, and a stale number here
+        // would reserve VRAM that is never allocated.
         let flashinfer_bytes: u64 = if self.use_flashinfer_workspace {
-            (512 + 128) * 1024 * 1024 // float + int buffers
+            // On Volta the eager slot is not allocated: the FlashInfer
+            // prefill kernels need SM80, so only the graph slot is used.
+            let slots = if self.skip_eager_workspace { 1 } else { 2 };
+            (attention_rs::workspace::workspace_gpu_bytes() * slots) as u64
         } else {
             0
         };
