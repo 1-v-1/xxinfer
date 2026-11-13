@@ -50,7 +50,7 @@ parking_lot = "0.12.4"
 # We never push to the upstream engine repository, so the dependency points at
 # the fork instead; a git reference keeps `cargo install --git` working, where
 # a path reference would force every user to clone the engine repo by hand.
-attention-rs = { git = "https://github.com/1-v-1/attention.rs.git", version = "0.6.9", rev = "f0422b54a40f6c932493d04e8c010b55c31bef1d" }
+attention-rs = { git = "https://github.com/1-v-1/attention.rs.git", version = "0.6.9", rev = "4a1446b4ec82fdd0fb0b1968454c2f0ede9078d4" }
 once_cell = "1.21.3"
 memmap2 = "0.9"
 tqdm = "0.8.0"
