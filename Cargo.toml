@@ -12,8 +12,8 @@ categories = ["algorithms", "hardware-support", "science"]
 license = "MIT"
 
 [dependencies]
-candle-core = { git = "https://github.com/guoqingbao/candle.git", version = "0.8.3", rev = "90efcb5" }
-candle-nn = { git = "https://github.com/guoqingbao/candle.git", version = "0.8.3", rev = "90efcb5" }
+candle-core = { git = "https://github.com/guoqingbao/candle.git", version = "0.8.3", rev = "90efcb5fc35cc0ad08aeb06987915adf994774f4" }
+candle-nn = { git = "https://github.com/guoqingbao/candle.git", version = "0.8.3", rev = "90efcb5fc35cc0ad08aeb06987915adf994774f4" }
 serde = { version = "1.0.190", features = ["serde_derive"] }
 tokenizers = {version = "0.21.2", features = ["http"] }
 hf-hub = "0.4.1"
@@ -50,7 +50,7 @@ parking_lot = "0.12.4"
 # We never push to the upstream engine repository, so the dependency points at
 # the fork instead; a git reference keeps `cargo install --git` working, where
 # a path reference would force every user to clone the engine repo by hand.
-attention-rs = { git = "https://github.com/1-v-1/attention.rs.git", version = "0.6.9", rev = "90efcb5" }
+attention-rs = { git = "https://github.com/1-v-1/attention.rs.git", version = "0.6.9", rev = "90efcb5fc35cc0ad08aeb06987915adf994774f4" }
 once_cell = "1.21.3"
 memmap2 = "0.9"
 tqdm = "0.8.0"
