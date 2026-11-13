@@ -1808,7 +1808,9 @@ impl VocabParallelEmbedding {
         // the same one.
         let mask = in_range.to_dtype(looked_up.dtype())?;
         let mask = mask.unsqueeze(1)?;
-        let looked_up = looked_up.mul(&mask)?;
+        // The mask has one column and the rows have the hidden size, so the
+        // multiplication has to broadcast.
+        let looked_up = looked_up.broadcast_mul(&mask)?;
 
         #[cfg(feature = "nccl")]
         {
