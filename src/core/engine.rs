@@ -504,14 +504,11 @@ impl LLMEngine {
         // model loading; both use the same helper so they cannot drift.
         let acceleration_report = {
             use crate::utils::sm70_diagnostics::{build_report, ReportInputs};
-            let compute_capability = candle_core::Device::cuda_if_available(0)
-                .ok()
-                .and_then(|d| {
-                    d.as_cuda_device()
-                        .ok()
-                        .and_then(|dev| attention_rs::cuda_utils::sm_version(&dev))
-                })
-                .map(|sm| sm as usize);
+            // The engine only orchestrates the runners, so it must not
+            // create a CUDA context: on a 16 GB card the context of the
+            // engine competes with the model for VRAM.
+            let compute_capability =
+                attention_rs::cuda_utils::sm_version_without_context(0).map(|sm| sm as usize);
             build_report(ReportInputs::from_engine(
                 &config,
                 &econfig,

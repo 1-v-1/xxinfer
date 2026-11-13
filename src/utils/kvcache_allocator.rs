@@ -339,6 +339,35 @@ fn uses_cutlass_workspace(config: &Config) -> bool {
     }
 }
 
+/// Releases the primary context of a device when it goes out of scope.
+///
+/// The primary context of a device costs about half a gigabyte on a V100.
+/// The engine process measures the free memory before the model is loaded
+/// and never allocates anything on the device itself, so it hands the
+/// context back instead of keeping it for the lifetime of the process.
+struct PrimaryContextGuard {
+    device_id: usize,
+}
+
+impl PrimaryContextGuard {
+    fn new(device_id: usize) -> Self {
+        Self { device_id }
+    }
+}
+
+impl Drop for PrimaryContextGuard {
+    fn drop(&mut self) {
+        use candle_core::cuda_backend::cudarc::driver::result;
+        unsafe {
+            // The device handle is looked up again because the one the
+            // context was created with is not kept here.
+            if let Ok(device) = result::device::get(self.device_id as i32) {
+                let _ = result::primary_ctx::release(device);
+            }
+        }
+    }
+}
+
 /// Whether the first CUDA device is a Volta (SM70).
 ///
 /// The FlashInfer prefill kernels need the `cp.async` of SM80, so on Volta
@@ -1253,8 +1282,14 @@ impl KVCacheAllocator {
         use candle_core::cuda_backend::cudarc::driver::sys;
         use candle_core::cuda_backend::CudaDevice;
 
-        // Create a CUDA context for that device
-        let _ = CudaDevice::new(device_id)?;
+        // Reading the free memory needs a context, and a context on a V100
+        // takes about half a gigabyte.  The engine process only measures the
+        // memory -- the KV cache is allocated in the runner -- so the context
+        // is released again right after the measurement.  Without that, the
+        // engine would take half a gigabyte away from the card that the
+        // first runner is going to fill with the model.
+        let device = CudaDevice::new(device_id)?;
+        let _guard = PrimaryContextGuard::new(device_id);
 
         unsafe {
             let mut free: usize = 0;
@@ -1290,7 +1325,8 @@ impl KVCacheAllocator {
         use candle_core::cuda_backend::cudarc::driver::sys;
         use candle_core::cuda_backend::CudaDevice;
 
-        let _ = CudaDevice::new(device_id)?;
+        let device = CudaDevice::new(device_id)?;
+        let _guard = PrimaryContextGuard::new(device_id);
         unsafe {
             let mut free: usize = 0;
             let mut total: usize = 0;
