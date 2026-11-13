@@ -617,6 +617,33 @@ impl MLP {
         // packed output in place.  BF16/F16/F32 are supported by the CUDA and
         // Metal kernels; clamped (DeepSeek-V4) and non-SiLU activations keep
         // the reference path.
+        let diag = std::env::var("XINFER_DIAG_NAN").map(|v| v == "1").unwrap_or(false);
+        macro_rules! probe {
+            ($name:expr, $t:expr) => {
+                if diag {
+                    let v = $t
+                        .to_dtype(candle_core::DType::F32)
+                        .ok()
+                        .and_then(|x| x.flatten_all().ok())
+                        .and_then(|x| x.to_vec1::<f32>().ok());
+                    if let Some(v) = v {
+                        let mut nan = 0usize;
+                        let mut inf = 0usize;
+                        let mut mx = 0f32;
+                        for x in &v {
+                            if x.is_nan() { nan += 1; }
+                            else if x.is_infinite() { inf += 1; }
+                            else { mx = mx.max(x.abs()); }
+                        }
+                        crate::log_info!(
+                            "[diag][mlp.{}] nan={nan} inf={inf} maxabs={mx} n={}",
+                            $name, v.len()
+                        );
+                    }
+                }
+            };
+        }
+        probe!("input", xs);
         if self.swiglu_limit <= 0.0
             && matches!(self.activation, Activation::Silu)
             && matches!(xs.dtype(), DType::BF16 | DType::F16 | DType::F32)
@@ -624,9 +651,13 @@ impl MLP {
             if let GateUpProjection::Packed(gate_up_proj) = &self.gate_up_proj {
                 if let Some((packed, splits)) = gate_up_proj.forward_packed(xs)? {
                     if splits.len() == 2 && splits[0] == splits[1] {
+                        probe!("gate_up", &packed);
                         let activated =
                             attention_rs::silu_and_mul::silu_and_mul(&packed, splits[0])?;
-                        return self.down_proj.forward(&activated);
+                        probe!("activated", &activated);
+                        let out = self.down_proj.forward(&activated)?;
+                        probe!("down", &out);
+                        return Ok(out);
                     }
                 }
             }
