@@ -1847,8 +1847,13 @@ impl LnNvfp4 {
         let (blocks, scales, prepacked_sm70) = {
             let sm = attention_rs::cuda_utils::sm_version(vb.device().as_cuda_device()?)
                 .unwrap_or(0) as usize;
-            let n = out_dim;
-            let k = in_dim;
+            // The loader has already applied the shard, so `blocks` only holds
+            // the local rows and columns.  The repack has to use the local
+            // shape; using the global `out_dim`/`in_dim` would allocate a
+            // weight that is as large as the unsharded one, which on a 27B
+            // model is several gigabytes per card.
+            let n = blocks.dim(0)?;
+            let k = blocks.dim(1)? * 2;
             if sm == 70 && weight_scale_swizzled.is_none() && k % 16 == 0 {
                 match attention_rs::nvfp4_linear::nvfp4_prepack_sm70(
                     &blocks,
