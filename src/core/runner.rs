@@ -1838,6 +1838,41 @@ impl ModelRunner {
         } else {
             logits.to_dtype(DType::F32)?
         };
+        // Diagnostic: the sampled text comes out empty, so look at what the
+        // logits actually hold.
+        {
+            use candle_core::TensorExt;
+            let dims = logits.dims().to_vec();
+            let stats = logits
+                .flatten_all()
+                .and_then(|t| t.to_dtype(DType::F32))
+                .and_then(|t| t.to_vec1::<f32>())
+                .map(|v| {
+                    let n = v.len();
+                    let mut mn = f32::INFINITY;
+                    let mut mx = f32::NEG_INFINITY;
+                    let mut sum = 0f64;
+                    let mut nan = 0usize;
+                    for x in &v {
+                        if x.is_nan() {
+                            nan += 1;
+                            continue;
+                        }
+                        mn = mn.min(*x);
+                        mx = mx.max(*x);
+                        sum += *x as f64;
+                    }
+                    (n, mn, mx, if n > 0 { sum / n as f64 } else { 0.0 }, nan)
+                });
+            match stats {
+                Ok((n, mn, mx, mean, nan)) => {
+                    crate::log_info!(
+                        "[diag] logits dims={dims:?} n={n} min={mn} max={mx} mean={mean} nan={nan}"
+                    );
+                }
+                Err(e) => crate::log_info!("[diag] logits stats failed: {e}"),
+            }
+        }
         let seq_ids: Vec<usize> = match &seqs {
             Seqs::SeqRefs(seqs) => seqs.iter().map(|s| s.id()).collect(),
             Seqs::DecodeVec(v) => v.iter().map(|s| s.id()).collect(),
@@ -2028,6 +2063,12 @@ impl ModelRunner {
             self.guided_decoding.commit(&seq_ids, &tokens, guided_step);
             tokens
         };
+
+        // Diagnostic: the generated text is empty, so look at which token
+        // ids were actually sampled.
+        if !tokens.is_empty() {
+            crate::log_info!("[diag] sampled token ids: {:?}", &tokens[..tokens.len().min(8)]);
+        }
 
         // Track tokens for sequences when penalties are enabled
         if has_any_penalty {
