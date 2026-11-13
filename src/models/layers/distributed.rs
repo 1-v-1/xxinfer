@@ -1283,13 +1283,49 @@ impl MergedParallelColumnLinear {
                         #[cfg(not(feature = "cuda"))]
                         let weight_scale_swizzled: Option<Tensor> = None;
 
+                        // On Volta the NVFP4 weights have to be repacked before
+                        // the tensor cores can be used.  The repacked weight
+                        // has exactly the same size as the packed one, so
+                        // repacking here and dropping the original keeps a
+                        // single copy of the weights.  Repacking lazily inside
+                        // the first matmul would keep both, which on a 27B
+                        // model is several gigabytes per card.
+                        #[cfg(feature = "cuda")]
+                        let (blocks, scales, prepacked_sm70) = {
+                            let n = merged_blocks.dim(0)?;
+                            let k = merged_blocks.dim(1)? * 2;
+                            if nvfp4_sm == 70 && weight_scale_swizzled.is_none() && k % 16 == 0 {
+                                match attention_rs::nvfp4_linear::nvfp4_prepack_sm70(
+                                    &merged_blocks,
+                                    &merged_scales,
+                                    nvfp4_global_scale,
+                                    None,
+                                    n,
+                                    k,
+                                ) {
+                                    Ok((w, s)) => (w, s, true),
+                                    Err(e) => {
+                                        candle_core::bail!(
+                                            "failed to prepack NVFP4 weights for SM70: {e}"
+                                        );
+                                    }
+                                }
+                            } else {
+                                (merged_blocks, merged_scales, false)
+                            }
+                        };
+                        #[cfg(not(feature = "cuda"))]
+                        let (blocks, scales, prepacked_sm70) =
+                            (merged_blocks, merged_scales, false);
+
                         LinearX::LnNvfp4(LnNvfp4 {
-                            blocks: merged_blocks,
-                            scales: merged_scales,
+                            blocks,
+                            scales,
                             global_scale: nvfp4_global_scale,
                             input_scale: nvfp4_input_scale,
                             bias: None,
                             weight_scale_swizzled,
+                            prepacked_sm70,
                         })
                     } else {
                         LinearX::LnMxfp4(LnMxfp4 {

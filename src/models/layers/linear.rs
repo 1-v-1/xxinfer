@@ -1681,6 +1681,15 @@ pub struct LnNvfp4 {
     pub input_scale: f32,
     pub bias: Option<Tensor>,
     pub weight_scale_swizzled: Option<Tensor>,
+    /// The weights are already repacked for the SM70 HMMA.884 kernel.
+    ///
+    /// On Volta the NVFP4 weights have to be repacked before the tensor
+    /// cores can be used, and the repacked form has exactly the same size
+    /// as the packed form it replaces.  Repacking at load time and dropping
+    /// the original therefore costs nothing, while repacking lazily inside
+    /// the first matmul would keep both copies alive: on a 27B model that
+    /// is several gigabytes per card.
+    pub prepacked_sm70: bool,
 }
 
 impl LnNvfp4 {
@@ -1828,6 +1837,39 @@ impl LnNvfp4 {
         #[cfg(not(feature = "cuda"))]
         let weight_scale_swizzled: Option<Tensor> = None;
 
+        // On Volta the NVFP4 weights have to be repacked before the tensor
+        // cores can be used, and the repacked form has exactly the same size
+        // as the packed one.  Repacking here and dropping the original keeps
+        // a single copy of the weights; repacking lazily inside the first
+        // matmul would keep both, which on a 27B model is several gigabytes
+        // per card.
+        #[cfg(feature = "cuda")]
+        let (blocks, scales, prepacked_sm70) = {
+            let sm = attention_rs::cuda_utils::sm_version(vb.device().as_cuda_device()?)
+                .unwrap_or(0) as usize;
+            let n = out_dim;
+            let k = in_dim;
+            if sm == 70 && weight_scale_swizzled.is_none() && k % 16 == 0 {
+                match attention_rs::nvfp4_linear::nvfp4_prepack_sm70(
+                    &blocks,
+                    &scales,
+                    global_scale,
+                    None,
+                    n,
+                    k,
+                ) {
+                    Ok((w, s)) => (w, s, true),
+                    Err(e) => {
+                        candle_core::bail!("failed to prepack NVFP4 weights for SM70: {e}");
+                    }
+                }
+            } else {
+                (blocks, scales, false)
+            }
+        };
+        #[cfg(not(feature = "cuda"))]
+        let (blocks, scales, prepacked_sm70) = (blocks, scales, false);
+
         Ok(Self {
             blocks,
             scales,
@@ -1835,6 +1877,7 @@ impl LnNvfp4 {
             input_scale,
             bias,
             weight_scale_swizzled,
+            prepacked_sm70,
         })
     }
 }
