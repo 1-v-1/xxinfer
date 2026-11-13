@@ -383,6 +383,7 @@ impl Qwen3_5ForCausalLM {
             )?;
             layers.push(layer);
             reporter.write().set_progress(i + 1);
+            crate::utils::mem_report::log_device_memory(&format!("layer {i}"));
         }
 
         let num_gdn_layers = gdn_layer_idx;

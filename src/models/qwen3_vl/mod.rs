@@ -226,6 +226,7 @@ impl Qwen3VLForConditionalGeneration {
             Some("model.language_model.".to_string())
         };
 
+        crate::utils::mem_report::log_device_memory("before the language model");
         let text_model = match arch {
             "Qwen3VLMoeForConditionalGeneration" => {
                 Qwen3TextModel::MoE(Qwen3MoEForCausalLM::new_with_prefix(
@@ -298,6 +299,7 @@ impl Qwen3VLForConditionalGeneration {
                 text_prefix,
             )?),
         };
+        crate::utils::mem_report::log_device_memory("after the language model");
 
         Ok(Self {
             text_model,

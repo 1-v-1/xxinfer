@@ -17,6 +17,7 @@ pub mod kv_backend;
 pub mod kvcache_allocator;
 pub use kv_backend::{CpuKvCache, GpuKvCache, KvCacheBackend};
 pub mod logits_processor;
+pub mod mem_report;
 pub mod multi_node;
 pub mod progress;
 pub mod sm70_diagnostics;
