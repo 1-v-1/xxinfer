@@ -333,7 +333,10 @@ impl Qwen3_5ForCausalLM {
                 vb.pp(&format!("{}{}", gguf_prefix, key_map["embed_tokens"])),
                 dtype,
             )?;
-            (VocabParallelEmbedding::replicated(embed, vocab_size), vocab_size)
+            (
+                VocabParallelEmbedding::replicated(embed.embeddings().clone(), vocab_size),
+                vocab_size,
+            )
         } else {
             let embed_vb = vb.pp(&format!("{}embed_tokens", prefix));
             let vocab_size = config.vocab_size.unwrap_or(0);

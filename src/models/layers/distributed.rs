@@ -1786,16 +1786,10 @@ impl VocabParallelEmbedding {
         // The token ids of this rank's rows are shifted down to the local
         // range; the ones outside are clamped to zero and masked out
         // afterwards.
-        let local = ids.broadcast_sub(&Tensor::from_slice(
-            self.row_offset as u32,
-            ids.shape(),
-            dev,
-        ))?;
-        let in_range = local.broadcast_le(&Tensor::from_slice(
-            (self.rows - 1) as u32,
-            ids.shape(),
-            dev,
-        ))?;
+        let offset = Tensor::from_slice(&[self.row_offset as u32], ids.shape(), dev)?;
+        let local = ids.broadcast_sub(&offset)?;
+        let last = Tensor::from_slice(&[(self.rows - 1) as u32], ids.shape(), dev)?;
+        let in_range = local.broadcast_le(&last)?;
         let local = in_range.broadcast_mul(&local)?;
 
         let looked_up = self.weight.index_select(&local, 0)?;
