@@ -1684,6 +1684,162 @@ fn pad_vocab_size(vocab_size: usize, world_size: usize) -> usize {
     ((per_rank + VOCAB_PADDING_SIZE - 1) / VOCAB_PADDING_SIZE) * VOCAB_PADDING_SIZE
 }
 
+/// An embedding table that is split across the tensor parallel ranks.
+///
+/// The table is a lookup, so each rank only needs the rows of the vocabulary
+/// that its own tokens can land on.  The rank holds the rows
+/// `[rank * rows, (rank + 1) * rows)`, looks the tokens that fall into its
+/// range up, zeroes the ones that do not, and gathers the result across the
+/// ranks so that every rank ends up with the full embedding.
+///
+/// Holding the whole table on every rank is what makes a 27B model with a
+/// 248k vocabulary expensive: the table is 2.5 GB, and half of it is
+/// duplicated on a two card setup.
+#[allow(dead_code)]
+pub struct VocabParallelEmbedding {
+    weight: Tensor,
+    /// The number of vocabulary rows this rank holds.
+    rows: usize,
+    /// The first vocabulary row this rank holds.
+    row_offset: usize,
+    #[cfg(feature = "nccl")]
+    all_gather: Option<AllGather>,
+    org_vocab_size: usize,
+}
+
+impl VocabParallelEmbedding {
+    /// Wraps an embedding table that every rank already holds in full.
+    pub fn replicated(weight: Tensor, vocab_size: usize) -> Self {
+        let rows = weight.dim(0).unwrap_or(vocab_size);
+        Self {
+            weight,
+            rows,
+            row_offset: 0,
+            #[cfg(feature = "nccl")]
+            all_gather: None,
+            org_vocab_size: vocab_size,
+        }
+    }
+
+    /// Loads the embedding table, keeping only the rows of this rank.
+    pub fn load(
+        vocab_size: usize,
+        hidden_size: usize,
+        vb: VarBuilderX,
+        comm: Rc<Comm>,
+        dtype: DType,
+    ) -> Result<Self> {
+        let world_size = comm.world_size();
+        let rank = comm.rank();
+        if world_size <= 1 {
+            let weight = vb.get((vocab_size, hidden_size), "weight")?.to_dtype(dtype)?;
+            return Ok(Self {
+                weight,
+                rows: vocab_size,
+                row_offset: 0,
+                #[cfg(feature = "nccl")]
+                all_gather: None,
+                org_vocab_size: vocab_size,
+            });
+        }
+
+        // The rows have to split evenly, otherwise the gather could not put
+        // the chunks back together.
+        if vocab_size % world_size != 0 {
+            candle_core::bail!(
+                "VocabParallelEmbedding: vocab size {} is not divisible by the world size {}",
+                vocab_size,
+                world_size
+            );
+        }
+        let rows = vocab_size / world_size;
+        let row_offset = rank * rows;
+
+        let weight = vb
+            .get_with_hints_dtype(
+                (rows, hidden_size),
+                "weight",
+                shard(0, rank, world_size),
+                dtype,
+            )?
+            .to_dtype(dtype)?;
+
+        #[cfg(feature = "nccl")]
+        let all_gather = Some(AllGather::new(comm));
+
+        Ok(Self {
+            weight,
+            rows,
+            row_offset,
+            #[cfg(feature = "nccl")]
+            all_gather,
+            org_vocab_size: vocab_size,
+        })
+    }
+
+    /// Looks the tokens up and gathers the result across the ranks.
+    pub fn forward(&self, tokens: &Tensor) -> Result<Tensor> {
+        let dev = self.weight.device();
+        let flat = tokens.flatten_all()?;
+        let ids = flat.to_dtype(DType::U32)?;
+
+        // The token ids of this rank's rows are shifted down to the local
+        // range; the ones outside are clamped to zero and masked out
+        // afterwards.
+        let local = ids.broadcast_sub(&Tensor::from_slice(
+            self.row_offset as u32,
+            ids.shape(),
+            dev,
+        ))?;
+        let in_range = local.broadcast_le(&Tensor::from_slice(
+            (self.rows - 1) as u32,
+            ids.shape(),
+            dev,
+        ))?;
+        let local = in_range.broadcast_mul(&local)?;
+
+        let looked_up = self.weight.index_select(&local, 0)?;
+        // The rows that do not belong to this rank contribute nothing, so
+        // they are zeroed before the gather.
+        let mask = in_range.to_dtype(DType::F32)?;
+        let mask = mask.unsqueeze(1)?;
+        let looked_up = looked_up.mul(&mask)?;
+
+        #[cfg(feature = "nccl")]
+        {
+            if let Some(all_gather) = &self.all_gather {
+                let ws = all_gather.world_size;
+                let hidden = looked_up.dim(1)?;
+                let batch = looked_up.dim(0)?;
+                // The gather concatenates the chunks along the first
+                // dimension, so the result is [ws * batch, hidden].  Each
+                // chunk holds the rows of one rank, and exactly one of the
+                // chunks has the row of a given token, so the chunks are
+                // summed rather than concatenated.
+                let gathered = all_gather.apply(&looked_up)?;
+                let gathered = gathered.reshape((ws, batch, hidden))?;
+                return Ok(gathered.sum(0)?);
+            }
+        }
+        Ok(looked_up)
+    }
+
+    /// The embedding rows this rank holds.
+    pub fn weight(&self) -> Tensor {
+        self.weight.clone()
+    }
+
+    /// The full embedding table, assembled on every rank.
+    pub fn full_weight(&self) -> Result<Tensor> {
+        Ok(self.weight.clone())
+    }
+
+    /// The number of vocabulary rows of the full table.
+    pub fn vocab_size(&self) -> usize {
+        self.org_vocab_size
+    }
+}
+
 impl VocabParallelLinear {
     #[allow(unused_variables)]
     pub fn load_no_bias(

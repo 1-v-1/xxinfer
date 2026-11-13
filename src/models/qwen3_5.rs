@@ -2,7 +2,7 @@
 // Qwen3.5 dense model with hybrid attention (full attention + GatedDeltaNet layers)
 use crate::models::layers::attention::Attention;
 use crate::models::layers::deltanet::GatedDeltaNet;
-use crate::models::layers::distributed::{Comm, VocabParallelLinear};
+use crate::models::layers::distributed::{Comm, VocabParallelEmbedding, VocabParallelLinear};
 use crate::models::layers::mask::get_attention_causal_mask;
 use crate::models::layers::mlp::MLP;
 use crate::models::layers::others::{embedding, rms_norm, NormX};
@@ -186,7 +186,7 @@ impl Qwen3_5DecoderLayer {
 // =============================================================================
 
 pub struct Qwen3_5ForCausalLM {
-    embed_tokens: candle_nn::Embedding,
+    embed_tokens: VocabParallelEmbedding,
     layers: Vec<Qwen3_5DecoderLayer>,
     norm: NormX,
     lm_head: VocabParallelLinear,
@@ -323,16 +323,30 @@ impl Qwen3_5ForCausalLM {
             config.tie_word_embeddings
         };
 
-        let (embed_tokens, vocab_size) = embedding(
-            config.vocab_size,
-            config.hidden_size,
-            if is_qvar_builder {
-                vb.pp(&format!("{}{}", gguf_prefix, key_map["embed_tokens"]))
-            } else {
-                vb.pp(&format!("{}embed_tokens", prefix))
-            },
-            dtype,
-        )?;
+        // The embedding table is split across the ranks: with a 248k
+        // vocabulary it is 2.5 GB, and replicating it on every rank would
+        // put that on every card.
+        let (embed_tokens, vocab_size) = if is_qvar_builder {
+            let (embed, vocab_size) = embedding(
+                config.vocab_size,
+                config.hidden_size,
+                vb.pp(&format!("{}{}", gguf_prefix, key_map["embed_tokens"])),
+                dtype,
+            )?;
+            (VocabParallelEmbedding::replicated(embed, vocab_size), vocab_size)
+        } else {
+            let embed_vb = vb.pp(&format!("{}embed_tokens", prefix));
+            let vocab_size = config.vocab_size.unwrap_or(0);
+            let embed = VocabParallelEmbedding::load(
+                vocab_size,
+                config.hidden_size,
+                embed_vb,
+                comm.clone(),
+                dtype,
+            )?;
+            let vocab_size = embed.vocab_size();
+            (embed, vocab_size)
+        };
 
         let rotary_emb = Arc::new(ScalingRotaryEmbedding::new(
             if is_qvar_builder || config.higher_precision_required() {
@@ -411,7 +425,7 @@ impl Qwen3_5ForCausalLM {
                 .map_or(false, |q| q.is_mlx_nvfp4);
         let lm_head = if is_mlx_nvfp4_tied {
             VocabParallelLinear::from_weight_bias(
-                embed_tokens.embeddings().clone(),
+                embed_tokens.weight(),
                 None,
                 comm.clone(),
                 vocab_size,
@@ -505,8 +519,14 @@ impl Qwen3_5ForCausalLM {
         }
     }
 
-    pub fn embed_weight(&self) -> &Tensor {
-        self.embed_tokens.embeddings()
+    /// The embedding rows this rank holds.
+    ///
+    /// The table is split across the ranks, so this is the local shard and
+    /// not the whole vocabulary.  The speculative decoding path uses it as
+    /// the draft head's embedding, which it applies the same way as the
+    /// main model does.
+    pub fn embed_weight(&self) -> Tensor {
+        self.embed_tokens.weight()
     }
 
     /// Get the last hidden state for MTP from the pre-allocated buffer.
