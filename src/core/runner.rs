@@ -602,6 +602,7 @@ impl ModelRunner {
             // be rolled back before replaying only the accepted prefix.
             mamba_prefix_capacity = mamba_prefix_capacity.max(mamba_cache_capacity.max(1));
         }
+        crate::utils::mem_report::log_device_memory("before the mamba cache");
         match &model {
             Model::Qwen3_5(model) => {
                 model.preallocate_mamba_cache(mamba_cache_capacity)?;
@@ -654,8 +655,10 @@ impl ModelRunner {
             );
         }
 
+        crate::utils::mem_report::log_device_memory("before the kv cache");
         let (mut gpu_kv_cache, cpu_kv_cache) =
             allocator.init_kv_cache(&allocation, dtype, &device, econfig.pd_config.as_ref())?;
+        crate::utils::mem_report::log_device_memory("after the kv cache");
 
         if let Model::DeepSeekV4(v4) = &model {
             // Share one Arc between engine GpuKvCache and model layers.
