@@ -306,6 +306,23 @@ where
     }
 
     fn set_capture_mem_pool(&self) -> Result<()> {
+        // A custom memory pool must NOT be installed as the device default
+        // during the capture.
+        //
+        // Allocations that a CUDA graph captures are turned into *memory
+        // nodes* of the graph.  The driver can only take ownership of such an
+        // allocation -- and give the graph a private, replayable address for
+        // it -- when the allocation came from the driver's own stream-ordered
+        // allocator.  With `cuDeviceSetMemPool` the allocation lands in our
+        // pool instead, the graph cannot adopt it, and the captured graph
+        // keeps a dependency on a pool that no longer matches: every
+        // `cuGraphLaunch` is then rejected with `CUDA_ERROR_INVALID_VALUE`.
+        //
+        // PyTorch's `torch.cuda.graph()` lets the driver own the graph's
+        // memory, and so does vLLM; do the same here.
+        if std::env::var("XINFER_CAPTURE_MEM_POOL").is_err() {
+            return Ok(());
+        }
         unsafe {
             let status = CudaGraph::capture_status(self.device.cu_stream().clone())?;
             if status == CUstreamCaptureStatus::CU_STREAM_CAPTURE_STATUS_ACTIVE {
@@ -353,6 +370,10 @@ where
     /// pool, or every later allocation in the process would be served from it
     /// and would keep the pool from ever shrinking.
     fn restore_default_mem_pool(&self) -> Result<()> {
+        if std::env::var("XINFER_CAPTURE_MEM_POOL").is_err() {
+            // No custom pool was installed, so there is nothing to detach.
+            return Ok(());
+        }
         let handle = match *self.pool_handle.read() {
             Some(h) => h,
             None => return Ok(()),
