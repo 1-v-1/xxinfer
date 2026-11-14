@@ -45,13 +45,26 @@ impl CudaGraph {
             graph.assume_init()
         };
 
+        // `cuGraphInstantiateWithFlags` is deprecated since CUDA 12 and takes
+        // no upload stream, so the executable graph is uploaded lazily on the
+        // first launch.  PyTorch's `cudaGraphInstantiate` -- and therefore
+        // vLLM's CUDA graph capture -- goes through `cudaGraphInstantiate`,
+        // which is `cuGraphInstantiateWithParams` with an explicit upload
+        // stream.  Use the same call here: the executable is then uploaded
+        // (and any error it has is reported) while the capture stream is
+        // still current.
         let mut graph_exec = MaybeUninit::uninit();
+        let mut params = sys::CUDA_GRAPH_INSTANTIATE_PARAMS {
+            flags,
+            hUploadStream: stream,
+            ..Default::default()
+        };
         let cu_graph_exec = unsafe {
             lib()
-                .cuGraphInstantiateWithFlags(graph_exec.as_mut_ptr(), cu_graph, flags)
+                .cuGraphInstantiateWithParams(graph_exec.as_mut_ptr(), cu_graph, &mut params)
                 .result()
                 .map_err(|e| {
-                    candle_core::Error::Msg(format!("cuGraphInstantiateWithFlags failed: {e:?}"))
+                    candle_core::Error::Msg(format!("cuGraphInstantiateWithParams failed: {e:?}"))
                 })?;
             graph_exec.assume_init()
         };
