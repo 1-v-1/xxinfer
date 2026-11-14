@@ -1126,6 +1126,27 @@ impl<M: CudaGraphModule> GraphCapturer<M> {
 
                 let should_capture =
                     !phase.is_cache_prewarm() && (!phase.is_warmup() || capture_in_warmup);
+                if std::env::var("XINFER_DIAG_RAC").is_ok() {
+                    use candle_core::cuda_backend::cudarc::driver::DevicePtr;
+                    let ptr = |t: &Tensor| -> u64 {
+                        let (st, _l) = t.storage_and_layout();
+                        match &*st {
+                            candle_core::Storage::Cuda(s) => s
+                                .as_cuda_slice::<u8>()
+                                .map(|sl| *sl.device_ptr() as u64)
+                                .unwrap_or(0),
+                            _ => 0,
+                        }
+                    };
+                    if let Some(pairs) = kv_caches {
+                        eprintln!(
+                            "[diag][rac][capture] phase={:?} bs={} kv0={:#x}",
+                            phase,
+                            bs,
+                            ptr(&pairs[0].0)
+                        );
+                    }
+                }
                 if std::env::var("XINFER_DIAG_GRAPH").is_ok() {
                     eprintln!(
                         "[diag][graph] phase={:?} bs={} should_capture={}",
