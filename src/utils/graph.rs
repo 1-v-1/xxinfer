@@ -219,6 +219,9 @@ where
     device: Arc<CudaDevice>,
     pub pool_handle: RwLock<Option<i64>>,
     captured_bs: Vec<usize>,
+    /// Number of tensor-parallel ranks; only a single rank needs no NCCL
+    /// group around the capture.
+    world_size: usize,
 }
 
 impl<M> CudaGraphWrapper<M>
@@ -232,6 +235,10 @@ where
     ) -> Result<Tensor>,
 {
     pub fn new(module: M, device: Arc<CudaDevice>) -> Self {
+        Self::with_world_size(module, device, 1)
+    }
+
+    pub fn with_world_size(module: M, device: Arc<CudaDevice>, world_size: usize) -> Self {
         Self {
             module,
             captured_graphs: BTreeMap::new(),
@@ -240,6 +247,7 @@ where
             device,
             pool_handle: RwLock::new(None),
             captured_bs: Vec::new(),
+            world_size,
         }
     }
 
@@ -487,6 +495,24 @@ where
         if diag { eprintln!("[diag][graph] start_capture: set_capture_mem_pool"); }
         self.set_capture_mem_pool()?;
         if diag { eprintln!("[diag][graph] start_capture: begin_capture"); }
+        // Open an NCCL group around the whole capture.
+        //
+        // Every tensor-parallel layer ends in an all-reduce.  NCCL captures
+        // a collective into a CUDA graph by putting it on an internal stream
+        // and connecting it to the capturing stream with events, and the
+        // event dependencies only come out right when the collectives of one
+        // capture belong to a single `ncclGroupStart`/`ncclGroupEnd` region.
+        // With one collective per group -- which is what an ungrouped
+        // all-reduce gives -- the captured graph ends up with a single wait
+        // event instead of one per collective, the all-reduce is left
+        // incomplete, and the two ranks end up with different logits.
+        #[cfg(feature = "nccl")]
+        {
+            use candle_core::cuda_backend::cudarc::nccl::safe::{group_end, group_start};
+            if self.world_size > 1 {
+                group_start().map_err(|e| crate::utils::nccl_err("ncclGroupStart", e))?;
+            }
+        }
         CudaGraph::begin_capture(
             self.device.cu_stream().clone(),
             CUstreamCaptureMode::CU_STREAM_CAPTURE_MODE_RELAXED,
@@ -499,21 +525,16 @@ where
         self.capturing = false;
         let bs = self.current_bs.take().unwrap();
 
-        // NOTE: we deliberately do NOT use
-        // CUDA_GRAPH_INSTANTIATE_FLAG_AUTO_FREE_ON_LAUNCH here.
-        //
-        // That flag frees the graph's private-pool allocations after every
-        // launch and re-creates them on the next one.  The re-creation is
-        // only guaranteed to hand back the *same* addresses while the pool
-        // still owns them, and under memory pressure it does not: the graph
-        // then re-runs kernels against addresses that no longer hold the
-        // captured tensors (the KV write lands nowhere, the logits freeze).
-        //
-        // This mirrors vLLM, which captures with PyTorch's `torch.cuda.graph()`
-        // and never sets that flag: the private pool keeps the captured
-        // allocations alive for the whole lifetime of the graph, so the
-        // addresses baked into the captured kernels stay valid on every
-        // replay.
+        // Close the NCCL group that `start_capture` opened, so that all the
+        // all-reduces of this capture become a single collective group.
+        #[cfg(feature = "nccl")]
+        {
+            use candle_core::cuda_backend::cudarc::nccl::safe::group_end;
+            if self.world_size > 1 {
+                group_end().map_err(|e| crate::utils::nccl_err("ncclGroupEnd", e))?;
+            }
+        }
+
         let graph = CudaGraph::end_capture(self.device.cu_stream().clone(), 0)?;
         graph.dump_nodes();
         self.captured_graphs

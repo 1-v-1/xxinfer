@@ -432,6 +432,7 @@ impl ModelRunner {
         let wrapper = crate::graph_wrapper!(
             &model,
             device,
+            comm.world_size(),
             {
                 Qwen3 => EmbedInputs,
                 Qwen3MoE => EmbedInputs,
@@ -460,6 +461,7 @@ impl ModelRunner {
             Some(crate::graph_wrapper!(
                 &model,
                 device,
+                comm.world_size(),
                 {
                     Qwen3 => EmbedInputs,
                     Qwen3MoE => EmbedInputs,
@@ -2145,6 +2147,29 @@ impl ModelRunner {
 
         // Diagnostic: the generated text is empty, so look at which token
         // ids were actually sampled.
+        if std::env::var("XINFER_DIAG_LOGITS").is_ok() {
+            let ordinal = self
+                .device
+                .as_cuda_device()
+                .map(|d| d.ordinal())
+                .unwrap_or(usize::MAX);
+            // The logits of a tensor-parallel model only carry the full
+            // vocabulary after the all-gather that combines the shards.
+            // When that collective does not happen inside the CUDA graph,
+            // every rank keeps its own shard and the two ranks sample
+            // different tokens, so it pays to see how much of the
+            // vocabulary is actually populated.
+            let flat = sample_logits.flatten_all()?;
+            let n = flat.dim(0)?;
+            let last = flat.narrow(0, n.saturating_sub(8), 8.min(n))?.to_vec1::<f32>().unwrap_or_default();
+            let first = flat.narrow(0, 0, 8.min(n))?.to_vec1::<f32>().unwrap_or_default();
+            let nz = flat.to_dtype(DType::F32)?.map(|t| {
+                t.to_vec1::<f32>().map(|v| v.iter().filter(|x| x.abs() > 1e-6).count()).unwrap_or(0)
+            })?;
+            crate::log_info!(
+                "[diag][ordinal {ordinal}] logits vocab={n} nonzero={nz} first={first:?} last={last:?}"
+            );
+        }
         if !tokens.is_empty() {
             let ordinal = self
                 .device
