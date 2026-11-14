@@ -56,18 +56,6 @@ impl CudaGraph {
                 })?;
             graph_exec.assume_init()
         };
-        if std::env::var("XINFER_DIAG_GRAPH").is_ok() {
-            // Count the kernel nodes that were captured.
-            let mut num_nodes: usize = 0;
-            unsafe {
-                let err = lib()
-                    .cuGraphGetNodes(graph.as_mut_ptr(), cu_graph, &mut num_nodes as *mut usize)
-                    .result();
-                eprintln!(
-                    "[diag][graph] captured graph nodes={num_nodes} err={err:?}"
-                );
-            }
-        }
         Ok(CudaGraph {
             cu_graph,
             cu_graph_exec,
