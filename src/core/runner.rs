@@ -1871,7 +1871,8 @@ impl ModelRunner {
             match stats {
                 Ok((n, mn, mx, mean, nan)) => {
                     crate::log_info!(
-                        "[diag] logits dims={dims:?} n={n} min={mn} max={mx} mean={mean} nan={nan}"
+                        "[diag] logits dims={dims:?} n={n} min={mn} max={mx} mean={mean} nan={nan} graph={}",
+                        std::env::var("XINFER_DIAG_GRAPH").is_ok()
                     );
                 }
                 Err(e) => crate::log_info!("[diag] logits stats failed: {e}"),
