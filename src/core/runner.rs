@@ -1172,8 +1172,9 @@ impl ModelRunner {
                         let head = k.narrow(0, 0, 1)?;
                         let sum = head.to_dtype(DType::F32)?.sum_all()?.to_scalar::<f32>()?;
                         crate::log_info!(
-                            "[diag][kv] after-replay k_block0_sum={sum} shape={:?}",
-                            head.shape()
+                            "[diag][kv] after-replay k_block0_sum={sum} shape={:?} full={:?}",
+                            head.shape(),
+                            k.shape()
                         );
                     }
                 }
