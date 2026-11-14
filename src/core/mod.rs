@@ -204,7 +204,7 @@ macro_rules! graph_wrapper {
                     boxed_closure,
                     $device.as_cuda_device()?.clone().into(),
                     $world_size,
-                    all_gather,
+                    Some(all_gather),
                     vocab_size,
                 )
             }, )+

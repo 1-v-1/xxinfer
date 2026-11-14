@@ -593,8 +593,8 @@ where
     fn gather_logits(&self, logits: Tensor) -> Result<Tensor> {
         #[cfg(feature = "nccl")]
         if let Some(all_gather) = &self.all_gather {
-            if all_gather.world_size > 1 {
-                let dims = logits.dims()?.to_vec();
+            if all_gather.world_size() > 1 {
+                let dims = logits.dims().to_vec();
                 let org_vocab_size = if self.vocab_size > 0 {
                     self.vocab_size
                 } else {
@@ -1479,7 +1479,7 @@ impl<M: CudaGraphModule> GraphCapturer<M> {
                     .get(&batch)
                     .unwrap_or(&graph_vars.outputs[&batch])
                     .narrow(0, 0, input_batch)?
-                    .contiguous();
+                    .contiguous()?;
                 // The graph holds this rank's vocabulary shard only; the
                 // all-gather has to happen outside the graph.
                 self.model.gather_logits(local)?

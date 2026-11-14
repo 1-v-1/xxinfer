@@ -1625,6 +1625,11 @@ impl AllGather {
     pub fn apply(&self, xs: &Tensor) -> Result<Tensor> {
         xs.apply_op1_no_bwd(self)
     }
+
+    /// Number of ranks the collective spans.
+    pub fn world_size(&self) -> usize {
+        self.world_size
+    }
 }
 
 impl CustomOp1 for AllGather {
