@@ -203,12 +203,15 @@ where
                 },
                 ..Default::default()
             };
+            let diag = std::env::var("XINFER_DIAG_GRAPH").is_ok();
+            if diag { eprintln!("[diag][graph] create_capture_pool: cuMemPoolCreate"); }
             lib()
                 .cuMemPoolCreate(&mut pool, &props)
                 .result()
                 .map_err(|e| {
                     candle_core::Error::Msg(format!("cuMemPoolCreate failed: {e:?}"))
                 })?;
+            if diag { eprintln!("[diag][graph] create_capture_pool: created"); }
 
             let handle = pool as *mut std::ffi::c_void as usize as i64;
             *self.pool_handle.write() = Some(handle);
@@ -259,10 +262,13 @@ where
             // the previous capture finished.  Without this, every capture
             // after the first one would allocate outside the pool, and the
             // pool usage would no longer describe what the graphs hold.
+            let diag = std::env::var("XINFER_DIAG_GRAPH").is_ok();
+            if diag { eprintln!("[diag][graph] set_capture_mem_pool: capture_status checked"); }
             let pool = match *self.pool_handle.read() {
                 Some(handle) => handle as usize as *mut sys::CUmemPoolHandle_st,
                 None => self.create_capture_pool()?,
             };
+            if diag { eprintln!("[diag][graph] set_capture_mem_pool: pool={pool:?}"); }
 
             lib()
                 .cuDeviceSetMemPool(*self.device.cu_device(), pool)
@@ -270,6 +276,7 @@ where
                 .map_err(|e| {
                     candle_core::Error::Msg(format!("cuDeviceSetMemPool failed: {e:?}"))
                 })?;
+            if diag { eprintln!("[diag][graph] set_capture_mem_pool: set_mem_pool done"); }
         }
 
         Ok(())
