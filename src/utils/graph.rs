@@ -565,8 +565,23 @@ where
         // all-reduce gives -- the captured graph ends up with a single wait
         // event instead of one per collective, the all-reduce is left
         // incomplete, and the two ranks end up with different logits.
+        //
+        // The group has to be opened *before* the capture starts and closed
+        // *inside* it, so that the aggregated collective kernels are the ones
+        // that get recorded into the graph.  Without the group the captured
+        // graph contains an all-reduce that never completes: the first replay
+        // then deadlocks with the peer rank inside the NCCL kernel (both GPUs
+        // spin at 100% SM with no memory traffic).
+        if self.world_size > 1 {
+            #[cfg(feature = "nccl")]
+            candle_core::cuda_backend::cudarc::nccl::safe::group_start()
+                .map_err(|e| candle_core::Error::Msg(format!("ncclGroupStart failed: {e:?}")))?;
+        }
         CudaGraph::begin_capture(
             self.device.cu_stream().clone(),
+            // RELAXED is required: the model allocates and frees tensors while
+            // it is being captured, and `cudaFree` is not allowed in the
+            // stricter capture modes (it invalidates the capture).
             CUstreamCaptureMode::CU_STREAM_CAPTURE_MODE_RELAXED,
         )?;
         if diag { eprintln!("[diag][graph] start_capture: done"); }
@@ -577,6 +592,14 @@ where
         self.capturing = false;
         let bs = self.current_bs.take().unwrap();
 
+        // Close the NCCL group while the capture is still active: NCCL only
+        // launches the aggregated collective kernels at `ncclGroupEnd`, and
+        // those launches are the ones that have to end up inside the graph.
+        if self.world_size > 1 {
+            #[cfg(feature = "nccl")]
+            candle_core::cuda_backend::cudarc::nccl::safe::group_end()
+                .map_err(|e| candle_core::Error::Msg(format!("ncclGroupEnd failed: {e:?}")))?;
+        }
 
         let graph = CudaGraph::end_capture(self.device.cu_stream().clone(), 0)?;
         graph.dump_nodes();
@@ -1019,7 +1042,22 @@ impl<M: CudaGraphModule> GraphCapturer<M> {
         // The capture therefore uses the context length that the captured
         // pages describe, which lands in the same split range as a real
         // decode step of a short request.
-        let capture_context_len = capture_pages_per_req as usize * self.block_size;
+        //
+        // The scalar baked into the attention kernel and the *page geometry*
+        // of the flashinfer metadata are two independent things and must be
+        // decoupled: the metadata is refreshed from the runtime buffers on
+        // every replay, so its shape has to match the runtime page count,
+        // while the scalar only selects the attention kernel variant
+        // (single split vs split-k).  Baking the page count into the scalar
+        // forced the scalar above `SPLIT_K_THRESHOLD` (8192), so the captured
+        // graph ran the split-k kernel while a real decode step of a short
+        // request runs the single-split kernel -- two different kernels with
+        // two different KV partitions, which is what made the captured graph
+        // produce garbage.
+        let capture_context_len: usize = match std::env::var("XINFER_CAPTURE_CTX_LEN") {
+            Ok(v) => v.parse::<usize>().unwrap_or(self.block_size),
+            Err(_) => self.block_size,
+        };
         let context_lens = Tensor::from_vec(
             vec![capture_context_len as u32; max_bs],
             (max_bs,),

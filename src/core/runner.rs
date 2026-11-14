@@ -2053,16 +2053,27 @@ impl ModelRunner {
         let flashinfer_metadata = if self.flashinfer_kv_params.is_some() {
             #[cfg(all(feature = "cuda", feature = "graph"))]
             let use_cuda_graph = {
+                // FlashInfer's decode kernel only survives a CUDA-graph
+                // replay when its plan was built in FlashInfer's own graph
+                // mode: the ordinary plan partitions the KV tiles with a
+                // grid-wide handshake that never completes inside a graph,
+                // and the replay hangs.  The plan is built before the capture
+                // happens, so this follows the graph being *enabled*, not the
+                // graph being captured already.
+                let graph_enabled = std::env::var("XINFER_ENABLE_DECODE_GRAPH")
+                    .map(|v| v != "0")
+                    .unwrap_or(false);
                 let require_exact_graph = match &self.model {
                     Model::Qwen3_5(_) | Model::Qwen3_5MoE(_) | Model::Qwen4(_) => true,
                     Model::Qwen3VL(model) => model.uses_hybrid_mamba_text_model(),
                     _ => false,
                 };
-                if require_exact_graph {
-                    self.decode_capturer.is_exact_captured(seq_refs.len())
-                } else {
-                    self.decode_capturer.is_captured(seq_refs.len())
-                }
+                graph_enabled
+                    || if require_exact_graph {
+                        self.decode_capturer.is_exact_captured(seq_refs.len())
+                    } else {
+                        self.decode_capturer.is_captured(seq_refs.len())
+                    }
             };
             #[cfg(not(all(feature = "cuda", feature = "graph")))]
             let use_cuda_graph = false;
