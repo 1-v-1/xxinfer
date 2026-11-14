@@ -1128,6 +1128,27 @@ impl<M: CudaGraphModule> GraphCapturer<M> {
                 if result.is_err() {
                     eprintln!("Error when replaying graph {:?}", result);
                 }
+                if std::env::var("XINFER_DIAG_KV").is_ok() {
+                    let slot = graph_vars
+                        .slot_mapping
+                        .to_dtype(DType::F32)?
+                        .to_vec1::<f32>()?;
+                    let pos = graph_vars
+                        .positions
+                        .to_dtype(DType::F32)?
+                        .to_vec1::<f32>()?;
+                    let clen = graph_vars
+                        .context_lens
+                        .to_dtype(DType::F32)?
+                        .to_vec1::<f32>()?;
+                    eprintln!(
+                        "[diag][graph] replay bs={batch} slot={slot:?} pos={pos:?} clen={clen:?} \
+                         input_slot={:?}",
+                        input_metadata.slot_mapping.as_ref().map(|t| t
+                            .to_dtype(DType::F32)
+                            .and_then(|t| t.to_vec1::<f32>()))
+                    );
+                }
                 if std::env::var("XINFER_DIAG_GRAPH").is_ok() {
                     eprintln!("[diag][graph] replay bs={batch} input_batch={input_batch}");
                 }
