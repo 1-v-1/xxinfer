@@ -45,17 +45,29 @@ impl CudaGraph {
             graph.assume_init()
         };
 
-        // `cuGraphInstantiateWithFlags` is deprecated since CUDA 12 and takes
-        // no upload stream, so the executable graph is uploaded lazily on the
-        // first launch.  PyTorch's `cudaGraphInstantiate` -- and therefore
-        // vLLM's CUDA graph capture -- goes through `cudaGraphInstantiate`,
-        // which is `cuGraphInstantiateWithParams` with an explicit upload
-        // stream.  Use the same call here: the executable is then uploaded
-        // (and any error it has is reported) while the capture stream is
-        // still current.
+        // `CUDA_GRAPH_INSTANTIATE_FLAG_AUTO_FREE_ON_LAUNCH` is required here.
+        //
+        // The graph contains memory allocation nodes: the model allocates its
+        // intermediate tensors while the capture is running, and every one of
+        // those allocations becomes a node of the graph.  A graph with memory
+        // nodes has to be instantiated with this flag -- on CUDA 12.4 the
+        // driver rejects every launch after the first one with
+        // `CUDA_ERROR_INVALID_VALUE` otherwise, because the memory the
+        // allocation nodes hand out is only valid for the launch it was
+        // created for.  The flag makes the driver release the allocations at
+        // the end of a launch and hand out fresh ones for the next launch;
+        // the driver then rewrites the pointers inside the kernel parameters,
+        // so the captured kernels keep working.
+        //
+        // This is only sound because the allocations come from the driver's
+        // own stream-ordered allocator (no custom memory pool is installed
+        // during the capture, see `set_capture_mem_pool`), which is what lets
+        // the driver take ownership of them in the first place.
         let mut graph_exec = MaybeUninit::uninit();
         let mut params = sys::CUDA_GRAPH_INSTANTIATE_PARAMS {
-            flags,
+            flags: flags
+                | sys::CUgraphInstantiate_flags::CUDA_GRAPH_INSTANTIATE_FLAG_AUTO_FREE_ON_LAUNCH
+                    as u64,
             hUploadStream: stream,
             ..Default::default()
         };
