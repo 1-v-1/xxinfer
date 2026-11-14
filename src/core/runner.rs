@@ -1244,7 +1244,7 @@ impl ModelRunner {
                 let nz = k
                     .to_dtype(DType::F32)?
                     .abs()?
-                    .gt(&0.0)?
+                    .gt(0.0f64)?
                     .sum_all()?
                     .to_scalar::<u32>()?;
                 crate::log_info!(
