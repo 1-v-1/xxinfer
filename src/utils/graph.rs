@@ -925,8 +925,15 @@ impl<M: CudaGraphModule> GraphCapturer<M> {
                 last_len,
             )
         };
+        // Capturing a second graph during the warm-up phase is only needed
+        // when the warm-up phase itself has to be replayed.  Every capture
+        // costs a full set of memory-allocation nodes, and with
+        // AUTO_FREE_ON_LAUNCH every launch of that extra graph frees and
+        // re-allocates its buffers, which can hand out the very addresses
+        // the real capture is using.
         #[cfg(feature = "flashinfer")]
-        let capture_in_warmup = self.flashinfer_kv_params.is_some();
+        let capture_in_warmup = self.flashinfer_kv_params.is_some()
+            && std::env::var("XINFER_CAPTURE_IN_WARMUP").is_ok();
         #[cfg(not(feature = "flashinfer"))]
         let capture_in_warmup = false;
 
