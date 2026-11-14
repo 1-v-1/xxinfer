@@ -836,7 +836,7 @@ pub fn graph_capture_batches_for_device(max_num_seqs: usize, device: &Device) ->
 /// replayed with a short one runs a partition that does not match the
 /// plan.  The ordinary mode keeps `padded_batch_size == batch_size`, which
 /// is fixed for a captured graph and lets the kernel follow the KV length.
-fn flashinfer_graph_mode() -> bool {
+pub(crate) fn flashinfer_graph_mode() -> bool {
     std::env::var("XINFER_FI_GRAPH_MODE")
         .map(|v| v != "0")
         .unwrap_or(false)

@@ -142,6 +142,31 @@ pub enum Model {
 }
 
 impl Model {
+    /// Name of the model variant, for diagnostics.
+    pub fn variant_name(&self) -> &'static str {
+        match self {
+            Model::Qwen3(_) => "Qwen3",
+            Model::Qwen3MoE(_) => "Qwen3MoE",
+            Model::Qwen3_5(_) => "Qwen3_5",
+            Model::Qwen3_5MoE(_) => "Qwen3_5MoE",
+            Model::Qwen4(_) => "Qwen4",
+            Model::LLaMa(_) => "LLaMa",
+            Model::LLaMa4(_) => "LLaMa4",
+            Model::Phi4(_) => "Phi4",
+            Model::GLM4(_) => "GLM4",
+            Model::GLM4MoE(_) => "GLM4MoE",
+            Model::GLM4MoeLite(_) => "GLM4MoeLite",
+            Model::DeepSeek(_) => "DeepSeek",
+            Model::DeepSeekV4(_) => "DeepSeekV4",
+            Model::GLM5(_) => "GLM5",
+            Model::Mistral3VL(_) => "Mistral3VL",
+            Model::Gemma3(_) => "Gemma3",
+            Model::Gemma4(_) => "Gemma4",
+            Model::Qwen3VL(_) => "Qwen3VL",
+            Model::MiniMax(_) => "MiniMax",
+        }
+    }
+
     /// Vocabulary size of the model.
     ///
     /// The vocabulary head is sharded across the tensor-parallel ranks, so
@@ -1203,9 +1228,45 @@ impl ModelRunner {
                     // state in a different shape than the eager path".
                     let kv_guard = self.get_kv_cache();
                     let kv_pairs = kv_guard.as_pairs();
+                    // The graph produces this rank's *local* vocabulary shard
+                    // (the collective is deliberately kept outside the graph),
+                    // so the eager reference has to be produced the same way,
+                    // otherwise the two tensors do not even have the same
+                    // shape and the element-wise comparison is meaningless.
+                    let skip_gather =
+                        crate::models::layers::distributed::SkipVocabGatherGuard::enable();
+                    // The graph branch returns before the eager path gets the
+                    // chance to build the FlashInfer decode plan, so the
+                    // reference forward has to ask for one itself.
+                    #[cfg(feature = "flashinfer")]
+                    if !is_prefill {
+                        if let Some(fm) = input_metadata.flashinfer_metadata.as_mut() {
+                            if fm.decode_plan_info.is_none() {
+                                if let Some(params) = self.flashinfer_kv_params {
+                                    fm.decode_plan_info =
+                                        Some(attention_rs::flashinfer::decode_plan(
+                                            &self.device,
+                                            params.kv_dtype,
+                                            params.out_dtype,
+                                            &fm.indptr_host,
+                                            fm.last_len_host.as_deref(),
+                                            fm.kv_len_arr_host.as_deref(),
+                                            input_ids.dim(0)?,
+                                            params.num_qo_heads,
+                                            params.num_kv_heads,
+                                            params.head_dim,
+                                            params.page_size,
+                                            fm.use_cuda_graph,
+                                            Some(
+                                                crate::utils::graph::flashinfer_graph_mode(),
+                                            ),
+                                        )?);
+                                }
+                            }
+                        }
+                    }
                     let eager = match &self.model {
                         Model::Qwen3_5(model) => {
-                            let _guard = model.lock_mamba_cache_for_graph();
                             Some(model.forward(
                                 &input_ids,
                                 &positions,
@@ -1214,8 +1275,33 @@ impl ModelRunner {
                                 false,
                             )?)
                         }
-                        _ => None,
+                        Model::Qwen3_5MoE(model) => {
+                            Some(model.forward(
+                                &input_ids,
+                                &positions,
+                                kv_pairs,
+                                &input_metadata,
+                                false,
+                            )?)
+                        }
+                        Model::Qwen3VL(model) => {
+                            Some(model.forward(
+                                &input_ids,
+                                &positions,
+                                kv_pairs,
+                                &input_metadata,
+                                None,
+                            )?)
+                        }
+                        other => {
+                            crate::log_info!(
+                                "[diag][compare] unsupported model variant: {}",
+                                other.variant_name()
+                            );
+                            None
+                        }
                     };
+                    drop(skip_gather);
                     let eager = match eager {
                         Some(e) => e,
                         None => {
