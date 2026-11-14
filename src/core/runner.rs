@@ -1191,6 +1191,80 @@ impl ModelRunner {
             if std::env::var("XINFER_DIAG_GRAPH").is_ok() {
                 crate::log_info!("[diag][graph] runner: is_prefill={is_prefill} can_replay={can_replay} batch={input_batch}");
             }
+            if std::env::var("XINFER_DIAG_INPUTS").is_ok() {
+                // What does the graph actually get as input, and is there
+                // anything in the KV cache for it to read?  A prefill that
+                // wrote into block 0 shows up as a non zero sum.
+                let dump = |name: &str, t: &Tensor| -> String {
+                    match t
+                        .to_dtype(DType::I64)
+                        .and_then(|x| x.flatten_all())
+                        .and_then(|x| x.to_vec1::<i64>())
+                    {
+                        Ok(v) => format!("{name}={:?}", v.iter().take(6).collect::<Vec<_>>()),
+                        Err(e) => format!("{name}=<err {e}>"),
+                    }
+                };
+                let md = &input_metadata;
+                eprintln!(
+                    "[diag][graph] src {} {}",
+                    dump("input_ids", &input_ids),
+                    dump("positions", &positions)
+                );
+                if let Some(cl) = md.context_lens.as_ref() {
+                    eprintln!("[diag][graph] src {}", dump("context_lens", cl));
+                }
+                eprintln!("[diag][graph] src {}", dump("slot_mapping", &md.slot_mapping));
+                if let Some(msm) = md.mamba_slot_mapping.as_ref() {
+                    eprintln!("[diag][graph] src {}", dump("mamba_slot", msm));
+                }
+                if let Some(bt) = md.block_tables.as_ref() {
+                    if let Ok(bt0) = bt
+                        .narrow(0, 0, 1)
+                        .and_then(|x| x.to_dtype(DType::I64))
+                        .and_then(|x| x.flatten_all())
+                        .and_then(|x| x.to_vec1::<i64>())
+                    {
+                        eprintln!(
+                            "[diag][graph] src block_tables[0]={:?}",
+                            bt0.iter().take(6).collect::<Vec<_>>()
+                        );
+                    }
+                }
+                let kv_guard = self.get_kv_cache();
+                if let Some((k, v)) = kv_guard.as_pairs().and_then(|p| p.first()) {
+                    if std::env::var("XINFER_DIAG_KVADDR").is_ok() {
+                        use candle_core::Storage;
+                        use candle_core::cuda_backend::cudarc::driver::DevicePtr;
+                        let ptr = |t: &Tensor| -> u64 {
+                            let (st, l) = t.storage_and_layout();
+                            match &*st {
+                                Storage::Cuda(c) => {
+                                    let base = match t.dtype() {
+                                        DType::F32 => c.as_cuda_slice::<f32>().map(|sl| *sl.device_ptr() as u64).unwrap_or(0),
+                                        DType::BF16 => c.as_cuda_slice::<half::bf16>().map(|sl| *sl.device_ptr() as u64).unwrap_or(0),
+                                        DType::F16 => c.as_cuda_slice::<half::f16>().map(|sl| *sl.device_ptr() as u64).unwrap_or(0),
+                                        _ => 0,
+                                    };
+                                    base.wrapping_add(l.start_offset() as u64 * t.dtype().size_in_bytes() as u64)
+                                }
+                                _ => 0,
+                            }
+                        };
+                        eprintln!("[diag][graph] runtime kv addr k={:#x} v={:#x}", ptr(&k), ptr(&v));
+                    }
+                    let sums: Vec<f32> = (0..3)
+                        .map(|b| {
+                            k.narrow(0, b, 1)
+                                .and_then(|x| x.to_dtype(DType::F32))
+                                .and_then(|x| x.sum_all())
+                                .and_then(|x| x.to_scalar::<f32>())
+                                .unwrap_or(0.0)
+                        })
+                        .collect();
+                    eprintln!("[diag][graph] kv block sums[0..3]={sums:?}");
+                }
+            }
             if !is_prefill && can_replay {
                 let logits = match &self.model {
                     Model::Qwen3_5(model) => {

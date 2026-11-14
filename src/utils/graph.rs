@@ -990,7 +990,6 @@ impl<M: CudaGraphModule> GraphCapturer<M> {
             device,
         )?;
         let slot_mapping = Tensor::from_vec(vec![-1i64; max_bs], (max_bs,), device)?;
-        let context_lens = Tensor::zeros((max_bs,), DType::U32, device)?;
         let block_tables = Tensor::zeros((max_bs, max_num_blocks), DType::U32, device)?;
         // The captured graph must see the *same* KV shape as the replays it
         // serves.  FlashInfer's split-kv decode partitions the work over the
@@ -1008,6 +1007,24 @@ impl<M: CudaGraphModule> GraphCapturer<M> {
         } else {
             max_num_blocks as u32
         };
+        // The captured graph bakes `max_context_len` into the attention
+        // kernel as a *scalar* argument, and that scalar decides how the KV
+        // range is split over the SMs (`flash_num_splits`: one split below
+        // `SPLIT_K_THRESHOLD`, a split-k partition above it).  Capturing
+        // with the full `max_model_len` produced a split-k partition of 32
+        // while a real decode step with a short context uses a single
+        // split: the graph then read the KV with a partition that does not
+        // match its plan and produced garbage (an immediate EOS).
+        //
+        // The capture therefore uses the context length that the captured
+        // pages describe, which lands in the same split range as a real
+        // decode step of a short request.
+        let capture_context_len = capture_pages_per_req as usize * self.block_size;
+        let context_lens = Tensor::from_vec(
+            vec![capture_context_len as u32; max_bs],
+            (max_bs,),
+            device,
+        )?;
         #[cfg(feature = "flashinfer")]
         let (flashinfer_indptr, flashinfer_indices, flashinfer_last_len, last_len_host) = {
             let mut indptr = Vec::with_capacity(max_bs + 1);
@@ -1161,7 +1178,11 @@ impl<M: CudaGraphModule> GraphCapturer<M> {
                     cu_seqlens_k: None,
                     max_seqlen_q: 0,
                     max_seqlen_k: 0,
-                    max_context_len: self.max_model_len,
+                    // The captured graph bakes this value into the attention
+                    // kernel as a scalar, so it has to stay in the same
+                    // split-k range as the real decode steps (see
+                    // `capture_context_len` above).
+                    max_context_len: capture_context_len,
                     seqlens: None,
                     flashinfer_metadata,
                     is_mtp_verify: false,
@@ -1288,6 +1309,26 @@ impl<M: CudaGraphModule> GraphCapturer<M> {
                         // whether the captured KV write took effect at all.
                         device.synchronize()?;
                         if let Some((k, _v)) = kv_caches.and_then(|p| p.first()) {
+                            if std::env::var("XINFER_DIAG_KVADDR").is_ok() {
+                                use candle_core::Storage;
+                                use candle_core::cuda_backend::cudarc::driver::DevicePtr;
+                                let ptr = |t: &Tensor| -> u64 {
+                                    let (st, l) = t.storage_and_layout();
+                                    match &*st {
+                                        Storage::Cuda(c) => {
+                                            let base = match t.dtype() {
+                                                DType::F32 => c.as_cuda_slice::<f32>().map(|sl| *sl.device_ptr() as u64).unwrap_or(0),
+                                                DType::BF16 => c.as_cuda_slice::<half::bf16>().map(|sl| *sl.device_ptr() as u64).unwrap_or(0),
+                                                DType::F16 => c.as_cuda_slice::<half::f16>().map(|sl| *sl.device_ptr() as u64).unwrap_or(0),
+                                                _ => 0,
+                                            };
+                                            base.wrapping_add(l.start_offset() as u64 * t.dtype().size_in_bytes() as u64)
+                                        }
+                                        _ => 0,
+                                    }
+                                };
+                                eprintln!("[diag][graph] capture kv addr k={:#x} v={:#x}", ptr(&k), ptr(&_v));
+                            }
                             let nb = k.dim(0)?;
                             let mut hits = Vec::new();
                             for b in 0..nb.min(24) {
@@ -1446,6 +1487,38 @@ impl<M: CudaGraphModule> GraphCapturer<M> {
 
                     graph_vars.flashinfer_indices.zero_()?;
                     graph_vars.flashinfer_indices.copy_(&fm.indices, 0)?;
+
+                    if std::env::var("XINFER_DIAG_GVARS").is_ok() {
+                        // What the captured kernels will actually read.
+                        let d = |name: &str, t: &Tensor| -> String {
+                            match t
+                                .to_dtype(DType::I64)
+                                .and_then(|x| x.flatten_all())
+                                .and_then(|x| x.to_vec1::<i64>())
+                            {
+                                Ok(v) => format!("{name}={:?}", v.iter().take(6).collect::<Vec<_>>()),
+                                Err(e) => format!("{name}=<err {e}>"),
+                            }
+                        };
+                        eprintln!(
+                            "[diag][graph] gvars {} {} {} {}",
+                            d("input_ids", &graph_vars.input_ids),
+                            d("positions", &graph_vars.positions),
+                            d("context_lens", &graph_vars.context_lens),
+                            d("slot_mapping", &graph_vars.slot_mapping)
+                        );
+                        if let Ok(bt) = graph_vars
+                            .block_tables
+                            .to_dtype(DType::I64)
+                            .and_then(|x| x.flatten_all())
+                            .and_then(|x| x.to_vec1::<i64>())
+                        {
+                            eprintln!(
+                                "[diag][graph] gvars block_tables[0..6]={:?}",
+                                bt.iter().take(6).collect::<Vec<_>>()
+                            );
+                        }
+                    }
 
                     if let Some(params) = self.flashinfer_kv_params {
                         let dev = self
