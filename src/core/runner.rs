@@ -1246,6 +1246,16 @@ impl ModelRunner {
         let _prefill_guard = set_linear_is_prefill(is_prefill);
         let kv_guard = self.get_kv_cache();
         let kv_pairs = kv_guard.as_pairs();
+        if std::env::var("XINFER_DIAG_KV").is_ok() {
+            if let Some((k, _v)) = kv_pairs.and_then(|p| p.first()) {
+                let head = k.narrow(0, 0, 1)?;
+                let sum = head.to_dtype(DType::F32)?.sum_all()?.to_scalar::<f32>()?;
+                crate::log_info!(
+                    "[diag][kv] before-forward prefill={is_prefill} k_block0_sum={sum} shape={:?}",
+                    head.shape()
+                );
+            }
+        }
         let logits = if let Some(drafter) = self.dflash_drafter.as_ref() {
             let target_layer_ids = drafter.target_layer_ids();
             let (logits, hidden_states) = self.model.forward_collecting_layers(
