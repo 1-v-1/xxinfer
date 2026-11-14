@@ -216,6 +216,28 @@ impl CudaGraphHandle {
         self.graph
             .launch()
             .map_err(|e| candle_core::Error::Msg(format!("CUDA Graph launch failed: {:?}", e)))?;
+        // `cuGraphLaunch` is asynchronous: the nodes of the graph are still
+        // running when this returns.  Everything that reads the graph's
+        // outputs (the vocabulary all-gather reads the stable output buffer,
+        // the sampler reads the gathered logits) would otherwise race with
+        // the graph, and it would read the *previous* step's values.
+        //
+        // The symptom was a repeated token id, and it disappeared as soon as
+        // any diagnostic made a host-to-device copy -- that copy happens
+        // after the launch and synchronizes the device implicitly, which is
+        // exactly the ordering that is missing here.
+        //
+        // `cuCtxSynchronize` is used on purpose: a stream-level
+        // synchronization would only cover the stream that the graph was
+        // captured on, not the ones the collective runs on.
+        unsafe {
+            lib()
+                .cuCtxSynchronize()
+                .result()
+                .map_err(|e| {
+                    candle_core::Error::Msg(format!("cuCtxSynchronize after launch failed: {e:?}"))
+                })?;
+        }
         Ok(())
     }
 }
@@ -951,12 +973,23 @@ impl<M: CudaGraphModule> GraphCapturer<M> {
 
         let input_ids = Tensor::zeros((max_bs,), DType::U32, device)?;
         let positions = Tensor::zeros((max_bs,), DType::I64, device)?;
+        // The capture runs one dummy forward.  Its slot mapping must not
+        // point at a live cache slot: the GDN layers write their recurrent
+        // state (conv + ssm) in place into the slot they are given, so a
+        // dummy slot would overwrite the state of the request that owns it
+        // and every later replay would start from garbage.
+        //
+        // A negative slot is the established way to say "this row is
+        // padding": the GDN kernels (`if (slot < 0) return;`) and the KV
+        // write kernels (`if (slot_idx < 0) return;`) skip those rows
+        // without touching any cache.  The runtime refreshes the mapping
+        // with the real slots before every replay.
         let mamba_slot_mapping = Tensor::from_vec(
-            (0..max_bs).map(|i| i as i64).collect::<Vec<_>>(),
+            vec![-1i64; max_bs],
             (max_bs,),
             device,
         )?;
-        let slot_mapping = Tensor::zeros((max_bs,), DType::I64, device)?;
+        let slot_mapping = Tensor::from_vec(vec![-1i64; max_bs], (max_bs,), device)?;
         let context_lens = Tensor::zeros((max_bs,), DType::U32, device)?;
         let block_tables = Tensor::zeros((max_bs, max_num_blocks), DType::U32, device)?;
         // The captured graph must see the *same* KV shape as the replays it
@@ -1584,7 +1617,29 @@ impl<M: CudaGraphModule> GraphCapturer<M> {
                     .contiguous()?;
                 // The graph holds this rank's vocabulary shard only; the
                 // all-gather has to happen outside the graph.
-                self.model.gather_logits(local)
+                let gathered = self.model.gather_logits(local)?;
+                // The collective runs on NCCL's own stream, so the gathered
+                // logits are not necessarily visible to the stream that the
+                // sampler reads them from once this returns.  Without an
+                // explicit device-wide synchronization the sampler can read
+                // the *previous* step's logits, or the peer's half before the
+                // peer wrote it.  The symptom was a repeated token id and two
+                // ranks disagreeing on the same step, and it disappeared as
+                // soon as any diagnostic made a host-to-device copy (which
+                // synchronizes the device implicitly).
+                //
+                // `cuCtxSynchronize` is used on purpose: a stream-level
+                // synchronization would only cover the stream that the
+                // sampler reads from, not the one that NCCL runs on.
+                unsafe {
+                    lib()
+                        .cuCtxSynchronize()
+                        .result()
+                        .map_err(|e| {
+                            candle_core::Error::Msg(format!("cuCtxSynchronize failed: {e:?}"))
+                        })?;
+                }
+                Ok(gathered)
             } else {
                 candle_core::bail!("Input batch {} is not captured!", input_batch)
             }

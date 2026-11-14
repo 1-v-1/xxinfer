@@ -1228,13 +1228,14 @@ impl ModelRunner {
                     // state in a different shape than the eager path".
                     let kv_guard = self.get_kv_cache();
                     let kv_pairs = kv_guard.as_pairs();
-                    // The graph produces this rank's *local* vocabulary shard
-                    // (the collective is deliberately kept outside the graph),
-                    // so the eager reference has to be produced the same way,
-                    // otherwise the two tensors do not even have the same
-                    // shape and the element-wise comparison is meaningless.
-                    let skip_gather =
-                        crate::models::layers::distributed::SkipVocabGatherGuard::enable();
+                    // The graph's replay returns the *gathered* logits: the
+                    // collective of the vocabulary head deliberately runs
+                    // outside the graph (see `utils::graph`), so the graph
+                    // branch already holds the full vocabulary.  The eager
+                    // reference therefore has to be gathered as well --
+                    // skipping the gather would compare the full vocabulary
+                    // against the local shard, and the element-wise
+                    // comparison of two different lengths is meaningless.
                     // The graph branch returns before the eager path gets the
                     // chance to build the FlashInfer decode plan, so the
                     // reference forward has to ask for one itself.
@@ -1301,7 +1302,6 @@ impl ModelRunner {
                             None
                         }
                     };
-                    drop(skip_gather);
                     let eager = match eager {
                         Some(e) => e,
                         None => {
