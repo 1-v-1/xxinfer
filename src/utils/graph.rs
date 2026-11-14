@@ -233,6 +233,7 @@ where
             // therefore changed the behaviour of every allocation in the
             // process.
             let threshold: u64 = u64::MAX;
+            if diag { eprintln!("[diag][graph] create_capture_pool: set_attribute begin"); }
             lib()
                 .cuMemPoolSetAttribute(
                     pool,
@@ -243,6 +244,7 @@ where
                 .map_err(|e| {
                     candle_core::Error::Msg(format!("cuMemPoolSetAttribute failed: {e:?}"))
                 })?;
+            if diag { eprintln!("[diag][graph] create_capture_pool: set_attribute done"); }
         }
         Ok(pool)
     }
