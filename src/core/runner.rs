@@ -1176,6 +1176,18 @@ impl ModelRunner {
                             head.shape(),
                             k.shape()
                         );
+                        // Scan every block one at a time to find out where the
+                        // new token actually landed.
+                        let nblocks = k.dim(0)?;
+                        let mut touched = Vec::new();
+                        for b in 0..nblocks {
+                            let blk = k.narrow(0, b, 1)?;
+                            let s = blk.to_dtype(DType::F32)?.sum_all()?.to_scalar::<f32>()?;
+                            if s.abs() > 1e-6 {
+                                touched.push((b, s));
+                            }
+                        }
+                        crate::log_info!("[diag][kv] touched blocks: {:?}", &touched[..touched.len().min(12)]);
                     }
                 }
                 let output_ids = self.sample(&logits, seqs, is_prefill)?;
