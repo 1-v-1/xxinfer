@@ -1177,12 +1177,29 @@ impl ModelRunner {
                             k.shape(),
                             {
                                 use candle_core::cuda_backend::cudarc::driver::DevicePtr;
-                                let (st, _l) = k.storage_and_layout();
+                                let (st, l) = k.storage_and_layout();
                                 match &*st {
-                                    candle_core::Storage::Cuda(s) => s
-                                        .as_cuda_slice::<u8>()
-                                        .map(|sl| *sl.device_ptr() as u64)
-                                        .unwrap_or(0),
+                                    candle_core::Storage::Cuda(s) => {
+                                        let base = match k.dtype() {
+                                            DType::F16 => s
+                                                .as_cuda_slice::<half::f16>()
+                                                .map(|sl| *sl.device_ptr() as u64)
+                                                .unwrap_or(0),
+                                            DType::BF16 => s
+                                                .as_cuda_slice::<half::bf16>()
+                                                .map(|sl| *sl.device_ptr() as u64)
+                                                .unwrap_or(0),
+                                            DType::F32 => s
+                                                .as_cuda_slice::<f32>()
+                                                .map(|sl| *sl.device_ptr() as u64)
+                                                .unwrap_or(0),
+                                            _ => 0,
+                                        };
+                                        base.wrapping_add(
+                                            l.start_offset() as u64
+                                                * k.dtype().size_in_bytes() as u64,
+                                        )
+                                    }
                                     _ => 0,
                                 }
                             }
