@@ -1206,17 +1206,21 @@ impl ModelRunner {
                     let eager = match &self.model {
                         Model::Qwen3_5(model) => {
                             let _guard = model.lock_mamba_cache_for_graph();
-                            model.forward(
+                            Some(model.forward(
                                 &input_ids,
                                 &positions,
                                 kv_pairs,
                                 &input_metadata,
                                 false,
-                            )?
+                            )?)
                         }
-                        _ => {
+                        _ => None,
+                    };
+                    let eager = match eager {
+                        Some(e) => e,
+                        None => {
                             crate::log_info!("[diag][compare] unsupported model");
-                            continue;
+                            logits.clone()
                         }
                     };
                     let g = logits.to_dtype(DType::F32)?.flatten_all()?;
