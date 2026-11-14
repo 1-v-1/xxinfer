@@ -114,6 +114,20 @@ impl CudaGraphHandle {
     }
 
     pub fn replay(&self) -> Result<()> {
+        // The graph's input buffers are refreshed with `copy_` calls that run
+        // on candle's device stream.  The graph itself is launched on the
+        // stream that was current during the capture.  If the two differ,
+        // the launch can race ahead of the copies and the graph reads stale
+        // (or zeroed) input.  Synchronizing the capture stream first makes
+        // the dependency explicit.
+        unsafe {
+            lib()
+                .cuStreamSynchronize(self.graph.stream)
+                .result()
+                .map_err(|e| {
+                    candle_core::Error::Msg(format!("cuStreamSynchronize before launch failed: {e:?}"))
+                })?;
+        }
         self.graph
             .launch()
             .map_err(|e| candle_core::Error::Msg(format!("CUDA Graph launch failed: {:?}", e)))?;
