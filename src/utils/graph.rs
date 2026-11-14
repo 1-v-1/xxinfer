@@ -358,14 +358,19 @@ where
     ) -> Result<Tensor>,
 {
     fn start_capture(&mut self, bs: usize) -> Result<()> {
+        let diag = std::env::var("XINFER_DIAG_GRAPH").is_ok();
         self.capturing = true;
         self.current_bs = Some(bs);
+        if diag { eprintln!("[diag][graph] start_capture: sync_stream"); }
         self.sync_stream()?;
+        if diag { eprintln!("[diag][graph] start_capture: set_capture_mem_pool"); }
         self.set_capture_mem_pool()?;
+        if diag { eprintln!("[diag][graph] start_capture: begin_capture"); }
         CudaGraph::begin_capture(
             self.device.cu_stream().clone(),
             CUstreamCaptureMode::CU_STREAM_CAPTURE_MODE_RELAXED,
         )?;
+        if diag { eprintln!("[diag][graph] start_capture: done"); }
         Ok(())
     }
 
