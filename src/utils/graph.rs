@@ -266,7 +266,13 @@ where
             // pool usage would no longer describe what the graphs hold.
             let diag = std::env::var("XINFER_DIAG_GRAPH").is_ok();
             if diag { eprintln!("[diag][graph] set_capture_mem_pool: capture_status checked"); }
-            let pool = match *self.pool_handle.read() {
+            // The read guard has to be dropped before the pool is created:
+            // `create_capture_pool` takes the write lock, and the guard of
+            // `self.pool_handle.read()` would still be alive for the whole
+            // match expression, so the write would wait for a reader that
+            // only this thread can release.  It deadlocks.
+            let existing = *self.pool_handle.read();
+            let pool = match existing {
                 Some(handle) => handle as usize as *mut sys::CUmemPoolHandle_st,
                 None => self.create_capture_pool()?,
             };
@@ -295,6 +301,7 @@ where
             Some(h) => h,
             None => return Ok(()),
         };
+        // The read guard is dropped at the end of the statement above.
 
         unsafe {
             let mut default_pool: CUmemoryPool = ptr::null_mut();
@@ -346,12 +353,15 @@ where
 
     /// Retrieves the default CUDA memory pool for a device.
     pub fn get_current_mem_pool(&self) -> Result<CUmemoryPool> {
-        if self.pool_handle.read().is_some() {
-            let pool_handle = self.pool_handle.read().unwrap();
-            let pool: CUmemoryPool = pool_handle as usize as *mut sys::CUmemPoolHandle_st;
-            Ok(pool)
-        } else {
-            candle_core::bail!("Memory pool for graph is not init!")
+        // One read, one guard: the first `read()` in the condition would be a
+        // separate temporary.
+        let handle = *self.pool_handle.read();
+        match handle {
+            Some(pool_handle) => {
+                let pool: CUmemoryPool = pool_handle as usize as *mut sys::CUmemPoolHandle_st;
+                Ok(pool)
+            }
+            None => candle_core::bail!("Memory pool for graph is not init!"),
         }
     }
 }
