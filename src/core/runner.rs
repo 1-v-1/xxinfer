@@ -2159,7 +2159,7 @@ impl ModelRunner {
             // every rank keeps its own shard and the two ranks sample
             // different tokens, so it pays to see how much of the
             // vocabulary is actually populated.
-            let flat = sample_logits.flatten_all()?;
+            let flat = logits.flatten_all()?;
             let n = flat.dim(0)?;
             let last = flat.narrow(0, n.saturating_sub(8), 8.min(n))?.to_vec1::<f32>().unwrap_or_default();
             let first = flat.narrow(0, 0, 8.min(n))?.to_vec1::<f32>().unwrap_or_default();
