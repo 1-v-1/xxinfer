@@ -1482,7 +1482,7 @@ impl<M: CudaGraphModule> GraphCapturer<M> {
                     .contiguous()?;
                 // The graph holds this rank's vocabulary shard only; the
                 // all-gather has to happen outside the graph.
-                self.model.gather_logits(local)?
+                self.model.gather_logits(local)
             } else {
                 candle_core::bail!("Input batch {} is not captured!", input_batch)
             }
