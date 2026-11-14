@@ -2163,9 +2163,10 @@ impl ModelRunner {
             let n = flat.dim(0)?;
             let last = flat.narrow(0, n.saturating_sub(8), 8.min(n))?.to_vec1::<f32>().unwrap_or_default();
             let first = flat.narrow(0, 0, 8.min(n))?.to_vec1::<f32>().unwrap_or_default();
-            let nz = flat.to_dtype(DType::F32)?.map(|t| {
-                t.to_vec1::<f32>().map(|v| v.iter().filter(|x| x.abs() > 1e-6).count()).unwrap_or(0)
-            })?;
+            let nz = match flat.to_dtype(DType::F32)?.to_vec1::<f32>() {
+                Ok(v) => v.iter().filter(|x| x.abs() > 1e-6).count(),
+                Err(_) => 0,
+            };
             crate::log_info!(
                 "[diag][ordinal {ordinal}] logits vocab={n} nonzero={nz} first={first:?} last={last:?}"
             );
