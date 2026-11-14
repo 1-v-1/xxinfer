@@ -1489,9 +1489,10 @@ impl<M: CudaGraphModule> GraphCapturer<M> {
                             .flashinfer_indptr
                             .to_dtype(DType::F32)?
                             .to_vec1::<f32>()?;
+                        let n_idx = graph_vars.flashinfer_indices.dim(0)?;
                         let idx = graph_vars
                             .flashinfer_indices
-                            .narrow(0, 0, 4)?
+                            .narrow(0, 0, 4.min(n_idx))?
                             .to_dtype(DType::F32)?
                             .to_vec1::<f32>()?;
                         let llen = graph_vars
