@@ -1183,11 +1183,20 @@ impl ModelRunner {
         {
             let input_batch = input_ids.dim(0)?;
             let require_exact_graph = input_metadata.mamba_slot_mapping.is_some();
-            let can_replay = if require_exact_graph {
+            // The decode CUDA graph is still experimental on SM70: it replays,
+            // but its numbers do not match the eager path yet (the graph reads
+            // state that is not refreshed between replays).  Until the
+            // self-check is in place it stays opt-in, so that the default
+            // path keeps producing the correct text.
+            let graph_enabled = std::env::var("XINFER_ENABLE_DECODE_GRAPH")
+                .map(|v| v != "0")
+                .unwrap_or(false);
+            let captured = if require_exact_graph {
                 self.decode_capturer.is_exact_captured(input_batch)
             } else {
                 self.decode_capturer.is_captured(input_batch)
             };
+            let can_replay = graph_enabled && captured;
             if std::env::var("XINFER_DIAG_GRAPH").is_ok() {
                 crate::log_info!("[diag][graph] runner: is_prefill={is_prefill} can_replay={can_replay} batch={input_batch}");
             }
