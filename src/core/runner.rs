@@ -2146,7 +2146,16 @@ impl ModelRunner {
         // Diagnostic: the generated text is empty, so look at which token
         // ids were actually sampled.
         if !tokens.is_empty() {
-            crate::log_info!("[diag] sampled token ids: {:?}", &tokens[..tokens.len().min(8)]);
+            let ordinal = self
+                .device
+                .as_cuda_device()
+                .map(|d| d.ordinal())
+                .unwrap_or(usize::MAX);
+            crate::log_info!(
+                "[diag][ordinal {}] sampled token ids: {:?}",
+                ordinal,
+                &tokens[..tokens.len().min(8)]
+            );
         }
 
         // Track tokens for sequences when penalties are enabled
