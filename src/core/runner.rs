@@ -1236,7 +1236,7 @@ impl ModelRunner {
         if std::env::var("XINFER_DIAG_KV").is_ok() {
             // Checksum of the first full-attention layer's K cache: tells
             // whether a graph replay actually wrote the new token.
-            if let Some((k, _v)) = kv_pairs.first() {
+            if let Some((k, _v)) = kv_pairs.and_then(|p| p.first()) {
                 let sum = k
                     .to_dtype(DType::F32)?
                     .sum_all()?
