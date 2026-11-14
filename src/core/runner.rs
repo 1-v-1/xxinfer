@@ -1196,6 +1196,58 @@ impl ModelRunner {
                         .decode_capturer
                         .replay(&input_ids, &positions, &input_metadata)?,
                 };
+                if std::env::var("XINFER_DIAG_COMPARE").is_ok() {
+                    // Compare the graph replay against an eager forward with
+                    // exactly the same inputs.  This separates "the graph
+                    // computes something else" from "the graph leaves the
+                    // state in a different shape than the eager path".
+                    let kv_guard = self.get_kv_cache();
+                    let kv_pairs = kv_guard.as_pairs();
+                    let eager = match &self.model {
+                        Model::Qwen3_5(model) => {
+                            let _guard = model.lock_mamba_cache_for_graph();
+                            model.forward(
+                                &input_ids,
+                                &positions,
+                                kv_pairs,
+                                &input_metadata,
+                                false,
+                            )?
+                        }
+                        _ => {
+                            crate::log_info!("[diag][compare] unsupported model");
+                            continue;
+                        }
+                    };
+                    let g = logits.to_dtype(DType::F32)?.flatten_all()?;
+                    let e = eager.to_dtype(DType::F32)?.flatten_all()?;
+                    let n = std::cmp::min(g.elem_count(), e.elem_count());
+                    let gv = g.to_vec1::<f32>()?;
+                    let ev = e.to_vec1::<f32>()?;
+                    let mut max_diff = 0f32;
+                    let mut nan = 0usize;
+                    for i in 0..n {
+                        let d = (gv[i] - ev[i]).abs();
+                        if d.is_nan() {
+                            nan += 1;
+                        } else if d > max_diff {
+                            max_diff = d;
+                        }
+                    }
+                    let garg = (0..n)
+                        .max_by(|&a, &b| gv[a].partial_cmp(&gv[b]).unwrap())
+                        .unwrap_or(0);
+                    let earg = (0..n)
+                        .max_by(|&a, &b| ev[a].partial_cmp(&ev[b]).unwrap())
+                        .unwrap_or(0);
+                    crate::log_info!(
+                        "[diag][compare] n={n} max_diff={max_diff} nan={nan} \
+                         graph_argmax={garg} eager_argmax={earg} \
+                         graph_head={:?} eager_head={:?}",
+                        &gv[..8.min(n)],
+                        &ev[..8.min(n)]
+                    );
+                }
                 if std::env::var("XINFER_DIAG_KV").is_ok() {
                     let kv_guard = self.get_kv_cache();
                     if let Some((k, _v)) = kv_guard.as_pairs().and_then(|p| p.first()) {
