@@ -1241,7 +1241,12 @@ impl ModelRunner {
                     .to_dtype(DType::F32)?
                     .sum_all()?
                     .to_scalar::<f32>()?;
-                let nz = k.to_dtype(DType::F32)?.neq(&0.0)?.sum_all()?.to_scalar::<u32>()?;
+                let nz = k
+                    .to_dtype(DType::F32)?
+                    .abs()?
+                    .gt(&0.0)?
+                    .sum_all()?
+                    .to_scalar::<u32>()?;
                 crate::log_info!(
                     "[diag][kv] prefill={is_prefill} k_sum={sum} k_nonzero={nz} shape={:?}",
                     k.shape()
