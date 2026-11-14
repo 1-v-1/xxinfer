@@ -1336,7 +1336,12 @@ impl<M: CudaGraphModule> GraphCapturer<M> {
                     };
                     let stable = graph_vars.stable_outputs.get(&batch);
                     let out = graph_vars.outputs.get(&batch);
-                    let ordinal = self.device.as_ref().map(|d| d.ordinal()).unwrap_or(99);
+                    let ordinal = self
+                        .device
+                        .as_ref()
+                        .and_then(|d| d.as_cuda_device().ok())
+                        .map(|d| d.ordinal())
+                        .unwrap_or(99);
                     eprintln!(
                         "[diag][addr][o{ordinal}] bs={batch} stable={:?} out={:?} input_ids={:#x} slot_mapping={:#x}",
                         stable.map(|t| format!("{:#x}", addr(t))),
@@ -1365,7 +1370,12 @@ impl<M: CudaGraphModule> GraphCapturer<M> {
                             Err(e) => format!("err={e}"),
                         }
                     };
-                    let ordinal = self.device.as_ref().map(|d| d.ordinal()).unwrap_or(99);
+                    let ordinal = self
+                        .device
+                        .as_ref()
+                        .and_then(|d| d.as_cuda_device().ok())
+                        .map(|d| d.ordinal())
+                        .unwrap_or(99);
                     let stable = graph_vars.stable_outputs.get(&batch);
                     let out = graph_vars.outputs.get(&batch);
                     eprintln!(
