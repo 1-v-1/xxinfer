@@ -180,7 +180,9 @@ macro_rules! graph_wrapper {
     ($model:expr, $device:expr, $comm:expr, $world_size:expr,
         { $( $variant:ident => $arg:tt ),+ $(,)? }
     ) => {{
-        let vocab_size = $model.get_model_vocab_size();
+        let vocab_size = $model.vocab_size();
+        let all_gather =
+            crate::models::layers::distributed::AllGather::new($comm.clone());
         match $model {
             $( Model::$variant(m) => {
                 let model_arc = Arc::clone(m);
@@ -202,7 +204,7 @@ macro_rules! graph_wrapper {
                     boxed_closure,
                     $device.as_cuda_device()?.clone().into(),
                     $world_size,
-                    Some($comm.clone()),
+                    all_gather,
                     vocab_size,
                 )
             }, )+

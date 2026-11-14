@@ -142,6 +142,34 @@ pub enum Model {
 }
 
 impl Model {
+    /// Vocabulary size of the model.
+    ///
+    /// The vocabulary head is sharded across the tensor-parallel ranks, so
+    /// the gathered logits have to be trimmed back to this size.
+    pub fn vocab_size(&self) -> usize {
+        match self {
+            Model::Qwen3(model) => model.get_vocab_size(),
+            Model::Qwen3MoE(model) => model.get_vocab_size(),
+            Model::Qwen3_5(model) => model.get_vocab_size(),
+            Model::Qwen3_5MoE(model) => model.get_vocab_size(),
+            Model::Qwen4(model) => model.get_vocab_size(),
+            Model::LLaMa(model) => model.get_vocab_size(),
+            Model::LLaMa4(model) => model.get_vocab_size(),
+            Model::Phi4(model) => model.get_vocab_size(),
+            Model::GLM4(model) => model.get_vocab_size(),
+            Model::GLM4MoE(model) => model.get_vocab_size(),
+            Model::GLM4MoeLite(model) => model.get_vocab_size(),
+            Model::DeepSeek(model) => model.get_vocab_size(),
+            Model::DeepSeekV4(model) => model.get_vocab_size(),
+            Model::GLM5(model) => model.get_vocab_size(),
+            Model::Mistral3VL(model) => model.get_vocab_size(),
+            Model::Gemma3(model) => model.get_vocab_size(),
+            Model::Gemma4(model) => model.get_vocab_size(),
+            Model::Qwen3VL(model) => model.get_vocab_size(),
+            Model::MiniMax(model) => model.get_vocab_size(),
+        }
+    }
+
     /// Collect intermediate layer hiddens for DFlash2 prefill/decode context.
     pub fn forward_collecting_layers(
         &self,

@@ -230,8 +230,11 @@ where
     /// Number of tensor-parallel ranks; only a single rank needs no NCCL
     /// group around the capture.
     world_size: usize,
-    /// Communicator used to gather the vocabulary shards outside the graph.
-    comm: Option<std::rc::Rc<crate::models::layers::distributed::Comm>>,
+    /// Collective used to gather the vocabulary shards outside the graph.
+    ///
+    /// `AllGather` carries the same `Send`/`Sync` guarantees the model layers
+    /// already rely on, so the wrapper stays usable from the server state.
+    all_gather: Option<crate::models::layers::distributed::AllGather>,
     /// Vocabulary size of the model, used to trim the gathered logits.
     vocab_size: usize,
 }
@@ -258,7 +261,7 @@ where
         module: M,
         device: Arc<CudaDevice>,
         world_size: usize,
-        comm: Option<std::rc::Rc<crate::models::layers::distributed::Comm>>,
+        all_gather: Option<crate::models::layers::distributed::AllGather>,
         vocab_size: usize,
     ) -> Self {
         Self {
@@ -270,7 +273,7 @@ where
             pool_handle: RwLock::new(None),
             captured_bs: Vec::new(),
             world_size,
-            comm,
+            all_gather,
             vocab_size,
         }
     }
@@ -530,13 +533,6 @@ where
         // all-reduce gives -- the captured graph ends up with a single wait
         // event instead of one per collective, the all-reduce is left
         // incomplete, and the two ranks end up with different logits.
-        #[cfg(feature = "nccl")]
-        {
-            use candle_core::cuda_backend::cudarc::nccl::safe::{group_end, group_start};
-            if self.world_size > 1 {
-                group_start().map_err(|e| crate::utils::nccl_err("ncclGroupStart", e))?;
-            }
-        }
         CudaGraph::begin_capture(
             self.device.cu_stream().clone(),
             CUstreamCaptureMode::CU_STREAM_CAPTURE_MODE_RELAXED,
@@ -549,15 +545,6 @@ where
         self.capturing = false;
         let bs = self.current_bs.take().unwrap();
 
-        // Close the NCCL group that `start_capture` opened, so that all the
-        // all-reduces of this capture become a single collective group.
-        #[cfg(feature = "nccl")]
-        {
-            use candle_core::cuda_backend::cudarc::nccl::safe::group_end;
-            if self.world_size > 1 {
-                group_end().map_err(|e| crate::utils::nccl_err("ncclGroupEnd", e))?;
-            }
-        }
 
         let graph = CudaGraph::end_capture(self.device.cu_stream().clone(), 0)?;
         graph.dump_nodes();
@@ -605,10 +592,8 @@ where
     /// Gather the per-rank vocabulary shards outside the CUDA graph.
     fn gather_logits(&self, logits: Tensor) -> Result<Tensor> {
         #[cfg(feature = "nccl")]
-        if let Some(comm) = &self.comm {
-            if comm.world_size() > 1 {
-                let all_gather =
-                    crate::models::layers::distributed::AllGather::new(comm.clone());
+        if let Some(all_gather) = &self.all_gather {
+            if all_gather.world_size > 1 {
                 let dims = logits.dims()?.to_vec();
                 let org_vocab_size = if self.vocab_size > 0 {
                     self.vocab_size
@@ -616,7 +601,7 @@ where
                     dims[1]
                 };
                 return crate::models::layers::distributed::gather_vocab_logits(
-                    &all_gather,
+                    all_gather,
                     logits,
                     &dims,
                     org_vocab_size,
