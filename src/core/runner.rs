@@ -1172,9 +1172,17 @@ impl ModelRunner {
                         let head = k.narrow(0, 0, 1)?;
                         let sum = head.to_dtype(DType::F32)?.sum_all()?.to_scalar::<f32>()?;
                         crate::log_info!(
-                            "[diag][kv] after-replay k_block0_sum={sum} shape={:?} full={:?}",
+                            "[diag][kv] after-replay k_block0_sum={sum} shape={:?} full={:?} kc_ptr={:#x}",
                             head.shape(),
-                            k.shape()
+                            k.shape(),
+                            {
+                                use candle_core::cuda_backend::cudarc::driver::DevicePtr;
+                                let (st, _l) = k.storage_and_layout();
+                                match &*st {
+                                    candle_core::Storage::Cuda(s) => *s.device_ptr() as u64,
+                                    _ => 0,
+                                }
+                            }
                         );
                         // Per-entry sums of the first block: shows which slot
                         // of the block actually received the new token.
