@@ -278,6 +278,7 @@ impl ModelRunner {
                             params.head_dim,
                             params.page_size,
                             flashinfer_metadata.use_cuda_graph,
+                        None,
                         )?);
                 }
             }
@@ -507,6 +508,7 @@ impl ModelRunner {
                             params.head_dim,
                             params.page_size,
                             flashinfer_metadata.use_cuda_graph,
+                        None,
                         )?);
                 }
             }

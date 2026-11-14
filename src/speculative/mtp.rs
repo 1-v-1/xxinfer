@@ -113,7 +113,8 @@ impl ModelRunner {
                         params.head_dim,
                         params.page_size,
                         fm.use_cuda_graph,
-                    )?);
+                    None,
+                        )?);
                 }
             }
         }
