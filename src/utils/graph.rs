@@ -818,6 +818,20 @@ pub fn graph_capture_batches_for_device(max_num_seqs: usize, device: &Device) ->
 }
 
 #[cfg(feature = "flashinfer")]
+/// Whether FlashInfer should build its decode plan in CUDA-graph mode.
+///
+/// The default is off.  FlashInfer's graph mode forces `split_kv=true` and
+/// pads the batch to `max_grid_size/gdy`, so the number of KV tiles per
+/// split depends on the KV length: a graph captured with a long KV and
+/// replayed with a short one runs a partition that does not match the
+/// plan.  The ordinary mode keeps `padded_batch_size == batch_size`, which
+/// is fixed for a captured graph and lets the kernel follow the KV length.
+fn flashinfer_graph_mode() -> bool {
+    std::env::var("XINFER_FI_GRAPH_MODE")
+        .map(|v| v != "0")
+        .unwrap_or(false)
+}
+
 fn graph_decode_plan(
     device: &Device,
     params: &FlashInferKvParams,
@@ -827,6 +841,7 @@ fn graph_decode_plan(
     batch_size: usize,
     is_mla: bool,
     enable_cuda_graph: bool,
+    flashinfer_graph_mode: Option<bool>,
 ) -> Result<(Option<Vec<i64>>, Option<Vec<i64>>)> {
     if is_mla {
         let plan = attention_rs::mla::mla_decode_plan(
@@ -853,6 +868,7 @@ fn graph_decode_plan(
             params.head_dim,
             params.page_size,
             enable_cuda_graph,
+            flashinfer_graph_mode,
         )?;
         Ok((Some(plan), None))
     }
@@ -1057,6 +1073,7 @@ impl<M: CudaGraphModule> GraphCapturer<M> {
                                 bs,
                                 self.is_mla,
                                 true, //must be true for graph capture
+                                Some(flashinfer_graph_mode()),
                             )?;
                             (dp, mdp, Some(kv_len_arr_host_bs))
                         } else {
@@ -1372,6 +1389,7 @@ impl<M: CudaGraphModule> GraphCapturer<M> {
                             batch,
                             self.is_mla,
                             fm.use_cuda_graph,
+                            Some(flashinfer_graph_mode()),
                         )?;
                         if std::env::var("XINFER_DIAG_PLAN").is_ok() {
                             eprintln!(
