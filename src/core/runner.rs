@@ -1233,6 +1233,21 @@ impl ModelRunner {
         let _prefill_guard = set_linear_is_prefill(is_prefill);
         let kv_guard = self.get_kv_cache();
         let kv_pairs = kv_guard.as_pairs();
+        if std::env::var("XINFER_DIAG_KV").is_ok() {
+            // Checksum of the first full-attention layer's K cache: tells
+            // whether a graph replay actually wrote the new token.
+            if let Some((k, _v)) = kv_pairs.first() {
+                let sum = k
+                    .to_dtype(DType::F32)?
+                    .sum_all()?
+                    .to_scalar::<f32>()?;
+                let nz = k.to_dtype(DType::F32)?.neq(&0.0)?.sum_all()?.to_scalar::<u32>()?;
+                crate::log_info!(
+                    "[diag][kv] prefill={is_prefill} k_sum={sum} k_nonzero={nz} shape={:?}",
+                    k.shape()
+                );
+            }
+        }
         let logits = if let Some(drafter) = self.dflash_drafter.as_ref() {
             let target_layer_ids = drafter.target_layer_ids();
             let (logits, hidden_states) = self.model.forward_collecting_layers(
