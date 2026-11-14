@@ -809,6 +809,13 @@ impl<M: CudaGraphModule> GraphCapturer<M> {
                     for i in 0..bs {
                         indptr_host.push(((i + 1) * max_num_blocks) as u32);
                     }
+                    if std::env::var("XINFER_DIAG_GRAPH").is_ok() {
+                        eprintln!(
+                            "[diag][graph] capture bs={bs} max_num_blocks={max_num_blocks} \
+                             max_model_len={} block_size={} indptr_host={:?}",
+                            self.max_model_len, self.block_size, indptr_host
+                        );
+                    }
 
                     let (decode_plan_info, mla_decode_plan_info, kv_len_arr_host) =
                         if let Some(params) = self.flashinfer_kv_params {
