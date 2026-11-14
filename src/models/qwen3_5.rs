@@ -650,6 +650,9 @@ impl Qwen3_5ForCausalLM {
                 None
             };
 
+            if std::env::var("XINFER_DIAG_GRAPH").is_ok() {
+                eprintln!("[diag][graph] layer {i} start");
+            }
             xs = layer.forward(
                 &xs,
                 attention_mask.as_ref(),
@@ -659,6 +662,9 @@ impl Qwen3_5ForCausalLM {
                 &mut mamba_cache,
                 &seq_slots,
             )?;
+            if std::env::var("XINFER_DIAG_GRAPH").is_ok() {
+                eprintln!("[diag][graph] layer {i} done");
+            }
 
             if let (Some(layer_ids), Some(layers)) = (collect_layer_ids, collected_layers.as_mut())
             {

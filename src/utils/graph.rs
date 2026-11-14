@@ -854,6 +854,12 @@ impl<M: CudaGraphModule> GraphCapturer<M> {
 
                 let should_capture =
                     !phase.is_cache_prewarm() && (!phase.is_warmup() || capture_in_warmup);
+                if std::env::var("XINFER_DIAG_GRAPH").is_ok() {
+                    eprintln!(
+                        "[diag][graph] phase={:?} bs={} should_capture={}",
+                        phase, bs, should_capture
+                    );
+                }
                 if should_capture {
                     self.model.start_capture(bs)?;
                 }
@@ -879,8 +885,14 @@ impl<M: CudaGraphModule> GraphCapturer<M> {
                     )?;
                     outputs.insert(bs, out);
                 }
+                if std::env::var("XINFER_DIAG_GRAPH").is_ok() {
+                    eprintln!("[diag][graph] phase={:?} bs={} forward done", phase, bs);
+                }
                 if should_capture {
                     self.model.end_capture(!phase.is_warmup())?;
+                }
+                if std::env::var("XINFER_DIAG_GRAPH").is_ok() {
+                    eprintln!("[diag][graph] phase={:?} bs={} capture done", phase, bs);
                 }
             }
             #[cfg(feature = "cuda")]
