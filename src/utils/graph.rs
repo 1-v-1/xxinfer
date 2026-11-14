@@ -411,15 +411,14 @@ where
         self.capturing = false;
         let bs = self.current_bs.take().unwrap();
 
-        // AUTO_FREE_ON_LAUNCH frees the graph's private pool allocations after
-        // every launch and re-creates them on the next one.  That makes the
-        // addresses baked into the captured kernels stale, so the replayed
-        // kernels write to memory that is no longer the live intermediate
-        // tensor -- the KV cache silently stays empty and the decode output
-        // freezes.  Keep the allocations alive instead.
+        // AUTO_FREE_ON_LAUNCH: the graph's private pool allocations are freed
+        // after every launch and re-created on the next one.  That keeps the
+        // pool's footprint flat, but the pool has to stay alive for the
+        // re-creation to hand back the same addresses, so the device's default
+        // pool must not be swapped out from under it (see restore_default_mem_pool).
         let graph = CudaGraph::end_capture(
             self.device.cu_stream().clone(),
-            0u64,
+            CUgraphInstantiate_flags::CUDA_GRAPH_INSTANTIATE_FLAG_AUTO_FREE_ON_LAUNCH as u32 as u64,
         )?;
         self.captured_graphs
             .insert(bs, CudaGraphHandle::new(Arc::new(graph)));
@@ -1029,7 +1028,13 @@ impl<M: CudaGraphModule> GraphCapturer<M> {
         // alive -- but it must stop being the device's default pool, or every
         // later allocation in the process would be served from it and would
         // never be returned to the driver.
-        self.model.restore_default_mem_pool()?;
+        // Keep the capture pool installed: the captured graphs refer to it, and
+        // AUTO_FREE_ON_LAUNCH re-creates the allocations from it on every
+        // launch.  Unloading the pool here would leave the graph pointing at
+        // addresses that are no longer mapped.
+        if std::env::var("XINFER_KEEP_CAPTURE_POOL").is_err() {
+            self.model.restore_default_mem_pool()?;
+        }
         let _ = self.model.report_graph_pool_usage();
         crate::log_warn!("Captured batches {:?}", outputs.keys());
         self.graph_vars = Some(GraphCaptureVars {
