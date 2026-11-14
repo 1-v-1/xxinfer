@@ -1000,9 +1000,7 @@ impl<M: CudaGraphModule> GraphCapturer<M> {
                         // Read the KV cache right after the capture: the
                         // capture wrote to a distinctive slot, so this tells
                         // whether the captured KV write took effect at all.
-                        if let Some(dev) = device.as_cuda_device() {
-                            dev.synchronize()?;
-                        }
+                        device.synchronize()?;
                         if let Some((k, _v)) = kv_caches.and_then(|p| p.first()) {
                             let nb = k.dim(0)?;
                             let mut hits = Vec::new();
