@@ -1336,8 +1336,9 @@ impl<M: CudaGraphModule> GraphCapturer<M> {
                     };
                     let stable = graph_vars.stable_outputs.get(&batch);
                     let out = graph_vars.outputs.get(&batch);
+                    let ordinal = self.device.ordinal();
                     eprintln!(
-                        "[diag][addr] bs={batch} stable={:?} out={:?} input_ids={:#x} slot_mapping={:#x}",
+                        "[diag][addr][o{ordinal}] bs={batch} stable={:?} out={:?} input_ids={:#x} slot_mapping={:#x}",
                         stable.map(|t| format!("{:#x}", addr(t))),
                         out.map(|t| format!("{:#x}", addr(t))),
                         addr(&graph_vars.input_ids),
