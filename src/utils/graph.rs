@@ -1418,6 +1418,20 @@ impl<M: CudaGraphModule> GraphCapturer<M> {
                 }
 
                 let result = self.model.replay(batch);
+                if std::env::var("XINFER_DIAG_PLAN").is_ok() {
+                    if let Some(dev) = self
+                        .device
+                        .as_ref()
+                        .and_then(|d| d.as_cuda_device().ok())
+                    {
+                        match attention_rs::workspace::diag_plan_device_matches(dev, true) {
+                            Ok((is_match, report)) => {
+                                eprintln!("[diag][plan][replay] bs={batch} {report}");
+                            }
+                            Err(e) => eprintln!("[diag][plan][replay] error: {e}"),
+                        }
+                    }
+                }
                 if result.is_err() {
                     eprintln!("Error when replaying graph {:?}", result);
                 }
