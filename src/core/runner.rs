@@ -1179,7 +1179,10 @@ impl ModelRunner {
                                 use candle_core::cuda_backend::cudarc::driver::DevicePtr;
                                 let (st, _l) = k.storage_and_layout();
                                 match &*st {
-                                    candle_core::Storage::Cuda(s) => s.as_slice().as_ptr() as u64,
+                                    candle_core::Storage::Cuda(s) => s
+                                        .as_cuda_slice::<u8>()
+                                        .map(|sl| *sl.device_ptr() as u64)
+                                        .unwrap_or(0),
                                     _ => 0,
                                 }
                             }
