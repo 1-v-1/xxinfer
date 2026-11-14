@@ -996,6 +996,26 @@ impl<M: CudaGraphModule> GraphCapturer<M> {
                 }
                 if should_capture {
                     self.model.end_capture(!phase.is_warmup())?;
+                    if std::env::var("XINFER_DIAG_CAPSLO").is_ok() {
+                        // Read the KV cache right after the capture: the
+                        // capture wrote to a distinctive slot, so this tells
+                        // whether the captured KV write took effect at all.
+                        if let Some(dev) = device.as_cuda_device() {
+                            dev.synchronize()?;
+                        }
+                        if let Some((k, _v)) = kv_caches.and_then(|p| p.first()) {
+                            let nb = k.dim(0)?;
+                            let mut hits = Vec::new();
+                            for b in 0..nb.min(24) {
+                                let blk = k.narrow(0, b, 1)?;
+                                let s = blk.to_dtype(DType::F32)?.sum_all()?.to_scalar::<f32>()?;
+                                if s.abs() > 1e-6 {
+                                    hits.push((b, s));
+                                }
+                            }
+                            eprintln!("[diag][graph] after-capture KV blocks: {hits:?}");
+                        }
+                    }
                 }
                 if std::env::var("XINFER_DIAG_GRAPH").is_ok() {
                     eprintln!("[diag][graph] phase={:?} bs={} capture done", phase, bs);
