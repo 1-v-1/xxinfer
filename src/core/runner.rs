@@ -1188,6 +1188,16 @@ impl ModelRunner {
                             })
                             .collect::<Result<Vec<f32>>>()?;
                         crate::log_info!("[diag][kv] block0 entries: {:?}", entries);
+                        // A distinctive slot used at capture time lives in
+                        // another block; check whether the replay wrote it.
+                        let nb = k.dim(0)?;
+                        for b in 0..nb.min(16) {
+                            let blk = k.narrow(0, b, 1)?;
+                            let s = blk.to_dtype(DType::F32)?.sum_all()?.to_scalar::<f32>()?;
+                            if s.abs() > 1e-6 {
+                                crate::log_info!("[diag][kv] block {b} nonzero sum={s}");
+                            }
+                        }
                     }
                 }
                 let output_ids = self.sample(&logits, seqs, is_prefill)?;

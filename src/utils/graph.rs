@@ -937,10 +937,14 @@ impl<M: CudaGraphModule> GraphCapturer<M> {
                     );
                 }
                 if should_capture {
-                    if std::env::var("XINFER_DIAG_CAPSLO1").is_ok() {
-                        // Write to slot 1 instead of slot 0 at capture time, so
-                        // that a replay can be told apart from the prefill.
-                        let one = Tensor::from_vec(vec![1i64; bs], (bs,), slot_mapping.device())?;
+                    if let Ok(v) = std::env::var("XINFER_DIAG_CAPSLO") {
+                        // Write to a distinctive slot at capture time, so that a
+                        // replay can be told apart from the prefill: if the
+                        // kernel ends up writing to this slot during the
+                        // replay, the slot mapping baked into the graph is
+                        // stale.
+                        let slot: i64 = v.parse().unwrap_or(777);
+                        let one = Tensor::from_vec(vec![slot; bs], (bs,), slot_mapping.device())?;
                         slot_mapping.copy_(&one, 0)?;
                     }
                     if std::env::var("XINFER_DIAG_BADSLOT").is_ok() {
