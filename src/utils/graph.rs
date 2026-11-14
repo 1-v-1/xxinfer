@@ -1316,6 +1316,34 @@ impl<M: CudaGraphModule> GraphCapturer<M> {
                     }
                 }
 
+                if std::env::var("XINFER_DIAG_ADDR").is_ok() {
+                    let addr = |t: &Tensor| -> u64 {
+                        use candle_core::Storage;
+                        let (st, l) = t.storage_and_layout();
+                        match &*st {
+                            Storage::Cuda(c) => {
+                                let base = match t.dtype() {
+                                    DType::F32 => c.as_cuda_slice::<f32>().map(|sl| *sl.device_ptr() as u64).unwrap_or(0),
+                                    DType::BF16 => c.as_cuda_slice::<half::bf16>().map(|sl| *sl.device_ptr() as u64).unwrap_or(0),
+                                    DType::F16 => c.as_cuda_slice::<half::f16>().map(|sl| *sl.device_ptr() as u64).unwrap_or(0),
+                                    _ => 0,
+                                };
+                                base.wrapping_add(l.start_offset() as u64 * t.dtype().size_in_bytes() as u64)
+                            }
+                            _ => 0,
+                        }
+                    };
+                    let stable = graph_vars.stable_outputs.get(&batch);
+                    let out = graph_vars.outputs.get(&batch);
+                    eprintln!(
+                        "[diag][addr] bs={batch} stable={:?} out={:?} input_ids={:#x} slot_mapping={:#x}",
+                        stable.map(|t| format!("{:#x}", addr(t))),
+                        out.map(|t| format!("{:#x}", addr(t))),
+                        addr(&graph_vars.input_ids),
+                        addr(&graph_vars.slot_mapping),
+                    );
+                }
+
                 let result = self.model.replay(batch);
                 if result.is_err() {
                     eprintln!("Error when replaying graph {:?}", result);
