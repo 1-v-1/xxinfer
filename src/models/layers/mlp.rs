@@ -674,6 +674,20 @@ impl MLP {
                 };
                 let mut gate_shape = leading.clone();
                 gate_shape.push(m.n);
+                // Fused SiLU-and-mul straight out of the packed gate/up output.
+                // Splitting it into `narrow` + `reshape` costs two copies of
+                // the whole activation, and the separate `silu` and `mul` cost
+                // two more launches; the fused kernel reads the packed
+                // buffer in place and writes the activated tensor directly.
+                if self.swiglu_limit <= 0.0
+                    && matches!(self.activation, Activation::Silu)
+                    && matches!(gate_up.dtype(), DType::BF16 | DType::F16 | DType::F32)
+                {
+                    let activated = attention_rs::silu_and_mul::silu_and_mul(&gate_up, m.n)?;
+                    let activated = activated.reshape(gate_shape)?;
+                    let out = self.down_proj.forward(&activated)?;
+                    return Ok(out);
+                }
                 let gate = gate_up.narrow(1, 0, m.n)?.reshape(gate_shape.clone())?;
                 let up = gate_up.narrow(1, m.n, m.n)?.reshape(gate_shape)?;
                 (gate, up)
