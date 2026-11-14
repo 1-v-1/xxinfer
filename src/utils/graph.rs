@@ -471,6 +471,7 @@ where
 }
 
 #[derive(Clone, Copy)]
+#[derive(Debug)]
 enum CapturePhase {
     CachePrewarm,
     Warmup,
