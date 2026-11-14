@@ -1143,6 +1143,25 @@ impl<M: CudaGraphModule> GraphCapturer<M> {
                     eprintln!("Error when replaying graph {:?}", result);
                 }
                 if std::env::var("XINFER_DIAG_KV").is_ok() {
+                    #[cfg(feature = "flashinfer")]
+                    {
+                        let indptr = graph_vars
+                            .flashinfer_indptr
+                            .to_dtype(DType::F32)?
+                            .to_vec1::<f32>()?;
+                        let idx = graph_vars
+                            .flashinfer_indices
+                            .narrow(0, 0, 4)?
+                            .to_dtype(DType::F32)?
+                            .to_vec1::<f32>()?;
+                        let llen = graph_vars
+                            .flashinfer_last_len
+                            .to_dtype(DType::F32)?
+                            .to_vec1::<f32>()?;
+                        eprintln!(
+                            "[diag][graph] fi indptr={indptr:?} indices[0..4]={idx:?} last_len={llen:?}"
+                        );
+                    }
                     let slot = graph_vars
                         .slot_mapping
                         .to_dtype(DType::F32)?
