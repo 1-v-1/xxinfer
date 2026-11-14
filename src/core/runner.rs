@@ -1164,6 +1164,22 @@ impl ModelRunner {
                         .decode_capturer
                         .replay(&input_ids, &positions, &input_metadata)?,
                 };
+                if std::env::var("XINFER_DIAG_KV").is_ok() {
+                    let kv_guard = self.get_kv_cache();
+                    if let Some((k, _v)) = kv_guard.as_pairs().and_then(|p| p.first()) {
+                        let sum = k.to_dtype(DType::F32)?.sum_all()?.to_scalar::<f32>()?;
+                        let nz = k
+                            .to_dtype(DType::F32)?
+                            .abs()?
+                            .gt(0.0f64)?
+                            .sum_all()?
+                            .to_scalar::<u32>()?;
+                        crate::log_info!(
+                            "[diag][kv] after-replay k_sum={sum} k_nonzero={nz} shape={:?}",
+                            k.shape()
+                        );
+                    }
+                }
                 let output_ids = self.sample(&logits, seqs, is_prefill)?;
                 return Ok(output_ids);
             }
