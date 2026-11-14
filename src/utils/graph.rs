@@ -411,13 +411,15 @@ where
         self.capturing = false;
         let bs = self.current_bs.take().unwrap();
 
-        // AUTO_FREE_ON_LAUNCH: graph pool allocs are freed after each launch and
-        // re-created on the next. Required for V4's large capture pool to launch
-        // successfully. Logits must be D2D-copied into a non-pool buffer during
-        // capture so replay reads a stable address (see capture()).
+        // AUTO_FREE_ON_LAUNCH frees the graph's private pool allocations after
+        // every launch and re-creates them on the next one.  That makes the
+        // addresses baked into the captured kernels stale, so the replayed
+        // kernels write to memory that is no longer the live intermediate
+        // tensor -- the KV cache silently stays empty and the decode output
+        // freezes.  Keep the allocations alive instead.
         let graph = CudaGraph::end_capture(
             self.device.cu_stream().clone(),
-            CUgraphInstantiate_flags::CUDA_GRAPH_INSTANTIATE_FLAG_AUTO_FREE_ON_LAUNCH as u32 as u64,
+            0u64,
         )?;
         self.captured_graphs
             .insert(bs, CudaGraphHandle::new(Arc::new(graph)));
