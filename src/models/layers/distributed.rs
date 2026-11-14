@@ -1512,6 +1512,56 @@ impl ReplicatedLinear {
     }
 }
 
+use std::cell::Cell;
+
+thread_local! {
+    /// When enabled, [`VocabParallelLinear::forward`] returns only this rank's
+    /// vocabulary shard instead of the gathered full-vocabulary logits.
+    ///
+    /// A CUDA graph must not capture the NCCL all-gather: the tensor-parallel
+    /// ranks are separate processes that launch their graphs independently, so
+    /// a collective inside the graph has no cross-process rendezvous and the
+    /// gathered buffer ends up holding whatever the other rank had not
+    /// written yet.  The graph therefore produces the local shard and the
+    /// gather runs outside the graph, where NCCL's normal rendezvous applies.
+    static SKIP_VOCAB_GATHER: Cell<bool> = const { Cell::new(false) };
+}
+
+/// RAII guard that keeps [`VocabParallelLinear::forward`] returning the local
+/// vocabulary shard for as long as it lives.
+pub struct SkipVocabGatherGuard {
+    restore: bool,
+}
+
+impl SkipVocabGatherGuard {
+    /// Turn the local-shard-only behaviour on.
+    pub fn enable() -> Self {
+        let previous = skip_vocab_gather();
+        set_skip_vocab_gather(true);
+        Self { restore: !previous }
+    }
+}
+
+impl Drop for SkipVocabGatherGuard {
+    fn drop(&mut self) {
+        if self.restore {
+            set_skip_vocab_gather(false);
+        }
+    }
+}
+
+/// Enable or disable the "return the local shard only" behaviour of
+/// [`VocabParallelLinear::forward`].  The flag is thread-local because the
+/// capture runs on the thread that owns the graph.
+pub fn set_skip_vocab_gather(enabled: bool) {
+    SKIP_VOCAB_GATHER.with(|c| c.set(enabled));
+}
+
+/// Whether [`VocabParallelLinear::forward`] currently returns the local shard.
+pub fn skip_vocab_gather() -> bool {
+    SKIP_VOCAB_GATHER.with(|c| c.get())
+}
+
 /// Vocabulary-parallel linear layer for lm_head.
 ///
 /// Shards the output (vocab) dimension across TP ranks. Each rank holds
@@ -1980,6 +2030,10 @@ impl VocabParallelLinear {
     pub fn forward(&self, x: &Tensor) -> Result<Tensor> {
         let logits = self.linear.forward(x)?;
 
+        if skip_vocab_gather() {
+            return Ok(logits);
+        }
+
         self.finish_logits(logits, x.dims())
     }
 
@@ -2050,6 +2104,25 @@ impl VocabParallelLinear {
 
         #[cfg(feature = "nccl")]
         if let Some(all_gather) = &self.all_gather {
+            return gather_vocab_logits(all_gather, logits, input_dims, self.org_vocab_size);
+        }
+
+        Ok(logits)
+    }
+}
+
+/// Assemble the full-vocabulary logits from the per-rank shards.
+///
+/// This is the collective half of [`VocabParallelLinear::forward`], split out
+/// so that the CUDA-graph path can run it outside the graph.
+#[cfg(feature = "nccl")]
+pub fn gather_vocab_logits(
+    all_gather: &AllGather,
+    logits: Tensor,
+    input_dims: &[usize],
+    org_vocab_size: usize,
+) -> Result<Tensor> {
+    {
             // logits shape: [batch, local_vocab]
             // After NCCL all_gather: [world_size * batch, local_vocab] (concat along dim 0)
             // We need to reshape to [world_size, batch, local_vocab], transpose to
@@ -2082,13 +2155,12 @@ impl VocabParallelLinear {
                 logits
             };
 
-            if full_vocab > self.org_vocab_size {
+            if full_vocab > org_vocab_size {
                 let last_dim = logits.dims().len() - 1;
-                return logits.narrow(last_dim, 0, self.org_vocab_size);
+                return logits.narrow(last_dim, 0, org_vocab_size);
             }
             return Ok(logits);
-        }
-
-        Ok(logits)
     }
+
+    Ok(logits)
 }

@@ -177,9 +177,10 @@ macro_rules! graph_extra_arg {
 #[cfg(all(feature = "cuda", feature = "graph"))]
 #[macro_export]
 macro_rules! graph_wrapper {
-    ($model:expr, $device:expr, $world_size:expr,
+    ($model:expr, $device:expr, $comm:expr, $world_size:expr,
         { $( $variant:ident => $arg:tt ),+ $(,)? }
     ) => {{
+        let vocab_size = $model.get_model_vocab_size();
         match $model {
             $( Model::$variant(m) => {
                 let model_arc = Arc::clone(m);
@@ -197,10 +198,12 @@ macro_rules! graph_wrapper {
                     )
                 };
                 let boxed_closure: Box<ModelFn> = Box::new(closure);
-                CudaGraphWrapper::with_world_size(
+                CudaGraphWrapper::with_comm(
                     boxed_closure,
                     $device.as_cuda_device()?.clone().into(),
                     $world_size,
+                    Some($comm.clone()),
+                    vocab_size,
                 )
             }, )+
         }

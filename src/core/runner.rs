@@ -432,6 +432,7 @@ impl ModelRunner {
         let wrapper = crate::graph_wrapper!(
             &model,
             device,
+            comm.clone(),
             comm.world_size(),
             {
                 Qwen3 => EmbedInputs,
@@ -461,7 +462,8 @@ impl ModelRunner {
             Some(crate::graph_wrapper!(
                 &model,
                 device,
-                comm.world_size(),
+                comm.clone(),
+            comm.world_size(),
                 {
                     Qwen3 => EmbedInputs,
                     Qwen3MoE => EmbedInputs,

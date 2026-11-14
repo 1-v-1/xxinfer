@@ -165,6 +165,14 @@ pub trait CudaGraphModule {
         input_metadata: &InputMetadata,
         embeded_inputs: bool,
     ) -> Result<Tensor>;
+    /// Assemble the full-vocabulary logits from the per-rank shards.
+    ///
+    /// A CUDA graph cannot contain the NCCL all-gather of the vocabulary head:
+    /// the tensor-parallel ranks are separate processes that launch their
+    /// graphs independently, so a collective inside the graph has no
+    /// cross-process rendezvous.  The graph therefore produces this rank's
+    /// shard and the collective runs here, outside the graph.
+    fn gather_logits(&self, logits: Tensor) -> Result<Tensor>;
     fn report_graph_pool_usage(&self) -> Result<()>;
 
     /// Detach the capture pool from the device once the capture is over.
@@ -222,6 +230,10 @@ where
     /// Number of tensor-parallel ranks; only a single rank needs no NCCL
     /// group around the capture.
     world_size: usize,
+    /// Communicator used to gather the vocabulary shards outside the graph.
+    comm: Option<std::rc::Rc<crate::models::layers::distributed::Comm>>,
+    /// Vocabulary size of the model, used to trim the gathered logits.
+    vocab_size: usize,
 }
 
 impl<M> CudaGraphWrapper<M>
@@ -235,10 +247,20 @@ where
     ) -> Result<Tensor>,
 {
     pub fn new(module: M, device: Arc<CudaDevice>) -> Self {
-        Self::with_world_size(module, device, 1)
+        Self::with_comm(module, device, 1, None, 0)
     }
 
     pub fn with_world_size(module: M, device: Arc<CudaDevice>, world_size: usize) -> Self {
+        Self::with_comm(module, device, world_size, None, 0)
+    }
+
+    pub fn with_comm(
+        module: M,
+        device: Arc<CudaDevice>,
+        world_size: usize,
+        comm: Option<std::rc::Rc<crate::models::layers::distributed::Comm>>,
+        vocab_size: usize,
+    ) -> Self {
         Self {
             module,
             captured_graphs: BTreeMap::new(),
@@ -248,6 +270,8 @@ where
             pool_handle: RwLock::new(None),
             captured_bs: Vec::new(),
             world_size,
+            comm,
+            vocab_size,
         }
     }
 
@@ -576,6 +600,30 @@ where
             input_metadata,
             embeded_inputs,
         )
+    }
+
+    /// Gather the per-rank vocabulary shards outside the CUDA graph.
+    fn gather_logits(&self, logits: Tensor) -> Result<Tensor> {
+        #[cfg(feature = "nccl")]
+        if let Some(comm) = &self.comm {
+            if comm.world_size() > 1 {
+                let all_gather =
+                    crate::models::layers::distributed::AllGather::new(comm.clone());
+                let dims = logits.dims()?.to_vec();
+                let org_vocab_size = if self.vocab_size > 0 {
+                    self.vocab_size
+                } else {
+                    dims[1]
+                };
+                return crate::models::layers::distributed::gather_vocab_logits(
+                    &all_gather,
+                    logits,
+                    &dims,
+                    org_vocab_size,
+                );
+            }
+        }
+        Ok(logits)
     }
 
     /// Report how much memory the CUDA graphs actually hold.
@@ -944,6 +992,15 @@ impl<M: CudaGraphModule> GraphCapturer<M> {
         // allocation comes from the regular heap and survives every launch.
         let mut stable_buffers: BTreeMap<usize, Tensor> = BTreeMap::new();
         let _guard = candle_core::cuda_backend::cuda_param_cache_scope(true);
+        // The captured graph must not contain the NCCL all-gather of the
+        // vocabulary head.  The tensor-parallel ranks are separate processes
+        // that launch their graphs independently, so a collective inside the
+        // graph has no cross-process rendezvous: the gathered buffer ends up
+        // holding whatever the peer had not written yet.  The graph therefore
+        // produces this rank's vocabulary shard, and the gather runs outside
+        // the graph where NCCL's normal rendezvous applies.
+        let _gather_guard =
+            crate::models::layers::distributed::SkipVocabGatherGuard::enable();
         for phase in CapturePhase::ALL {
             let iter: Box<dyn Iterator<Item = usize>> = if phase.is_warmup() {
                 Box::new(0..self.graph_bs.len())
@@ -1432,12 +1489,15 @@ impl<M: CudaGraphModule> GraphCapturer<M> {
                 // Read from the stable buffer: the tensor that was produced
                 // during the capture lives in the graph memory pool, which the
                 // driver may release after every launch.
-                graph_vars
+                let local = graph_vars
                     .stable_outputs
                     .get(&batch)
                     .unwrap_or(&graph_vars.outputs[&batch])
                     .narrow(0, 0, input_batch)?
-                    .contiguous()
+                    .contiguous();
+                // The graph holds this rank's vocabulary shard only; the
+                // all-gather has to happen outside the graph.
+                self.model.gather_logits(local)?
             } else {
                 candle_core::bail!("Input batch {} is not captured!", input_batch)
             }
