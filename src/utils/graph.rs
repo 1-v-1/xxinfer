@@ -1085,6 +1085,9 @@ impl<M: CudaGraphModule> GraphCapturer<M> {
                 if result.is_err() {
                     eprintln!("Error when replaying graph {:?}", result);
                 }
+                if std::env::var("XINFER_DIAG_GRAPH").is_ok() {
+                    eprintln!("[diag][graph] replay bs={batch} input_batch={input_batch}");
+                }
 
                 graph_vars.outputs[&batch]
                     .narrow(0, 0, input_batch)?

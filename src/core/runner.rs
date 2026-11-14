@@ -1131,6 +1131,9 @@ impl ModelRunner {
             } else {
                 self.decode_capturer.is_captured(input_batch)
             };
+            if std::env::var("XINFER_DIAG_GRAPH").is_ok() {
+                crate::log_info!("[diag][graph] runner: is_prefill={is_prefill} can_replay={can_replay} batch={input_batch}");
+            }
             if !is_prefill && can_replay {
                 let logits = match &self.model {
                     Model::Qwen3_5(model) => {
