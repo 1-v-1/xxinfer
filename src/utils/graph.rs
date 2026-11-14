@@ -62,6 +62,49 @@ impl CudaGraph {
         })
     }
 
+    /// Dumps the node structure of the captured graph.
+    ///
+    /// Only used by the `XINFER_DIAG_GRAPH` diagnostic: when `cuGraphLaunch`
+    /// rejects a graph with `CUDA_ERROR_INVALID_VALUE` the reason is almost
+    /// always a node that the driver no longer accepts, and the node types
+    /// make that visible.
+    pub fn dump_nodes(&self) {
+        if std::env::var("XINFER_DIAG_GRAPH").is_err() {
+            return;
+        }
+        unsafe {
+            let mut num_nodes: usize = 0;
+            if lib()
+                .cuGraphGetNodes(self.cu_graph, std::ptr::null_mut(), &mut num_nodes)
+                .result()
+                .is_err()
+            {
+                eprintln!("[diag][graph] cuGraphGetNodes(count) failed");
+                return;
+            }
+            let mut nodes: Vec<sys::CUgraphNode> = vec![std::mem::zeroed(); num_nodes];
+            if lib()
+                .cuGraphGetNodes(self.cu_graph, nodes.as_mut_ptr(), &mut num_nodes)
+                .result()
+                .is_err()
+            {
+                eprintln!("[diag][graph] cuGraphGetNodes failed");
+                return;
+            }
+            let mut counts: std::collections::BTreeMap<String, usize> = Default::default();
+            for node in nodes.iter().take(num_nodes) {
+                let mut kind = sys::CUgraphNodeType::CU_GRAPH_NODE_TYPE_EMPTY;
+                if lib().cuGraphNodeGetType(*node, &mut kind).result().is_err() {
+                    *counts.entry("<unknown>".to_string()).or_insert(0) += 1;
+                    continue;
+                }
+                let name = format!("{kind:?}");
+                *counts.entry(name).or_insert(0) += 1;
+            }
+            eprintln!("[diag][graph] captured graph has {num_nodes} nodes: {counts:?}");
+        }
+    }
+
     pub fn capture_status(stream: sys::CUstream) -> Result<sys::CUstreamCaptureStatus> {
         let mut status = CUstreamCaptureStatus::CU_STREAM_CAPTURE_STATUS_NONE;
         unsafe {
@@ -426,6 +469,7 @@ where
         // addresses baked into the captured kernels stay valid on every
         // replay.
         let graph = CudaGraph::end_capture(self.device.cu_stream().clone(), 0)?;
+        graph.dump_nodes();
         self.captured_graphs
             .insert(bs, CudaGraphHandle::new(Arc::new(graph)));
 
