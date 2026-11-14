@@ -528,6 +528,16 @@ pub struct GraphCaptureVars {
     #[cfg(feature = "flashinfer")]
     pub flashinfer_last_len: Tensor,
     pub outputs: BTreeMap<usize, Tensor>,
+    /// Logits copied out of the capture memory pool.
+    ///
+    /// The tensor that the model returns during capture lives in the CUDA
+    /// graph memory pool, which the driver may hand back after every launch
+    /// (`CUDA_GRAPH_INSTANTIATE_FLAG_AUTO_FREE_ON_LAUNCH`).  Reading that
+    /// memory after a replay is therefore not reliable, so the logits are
+    /// copied into a buffer that is allocated outside the pool while the
+    /// capture is still running.  The copy is a device-to-device memcpy that
+    /// the capture records, so every replay refreshes the buffer.
+    pub stable_outputs: BTreeMap<usize, Tensor>,
 }
 
 pub struct MtpGraphCaptureVars {
@@ -789,6 +799,11 @@ impl<M: CudaGraphModule> GraphCapturer<M> {
         let capture_in_warmup = false;
 
         let mut outputs = BTreeMap::<usize, Tensor>::new();
+        let mut stable_outputs = BTreeMap::<usize, Tensor>::new();
+        // Stable output buffers, allocated during the cache-prewarm phase.
+        // At that point the capture memory pool is not installed yet, so the
+        // allocation comes from the regular heap and survives every launch.
+        let mut stable_buffers: BTreeMap<usize, Tensor> = BTreeMap::new();
         let _guard = candle_core::cuda_backend::cuda_param_cache_scope(true);
         for phase in CapturePhase::ALL {
             let iter: Box<dyn Iterator<Item = usize>> = if phase.is_warmup() {
@@ -896,13 +911,23 @@ impl<M: CudaGraphModule> GraphCapturer<M> {
                     self.model.start_capture(bs)?;
                 }
                 if phase.is_warmup() {
-                    let _ = self.model.forward(
+                    let out = self.model.forward(
                         &input_ids_bs,
                         &positions_bs,
                         kv_caches,
                         &input_metadata,
                         false,
                     )?;
+                    // The cache-prewarm phase runs before the capture memory
+                    // pool is installed, so this allocation is a normal one
+                    // that outlives the capture.  Its shape is the logits
+                    // shape, which is what the stable buffer needs.
+                    if phase.is_cache_prewarm() && !stable_buffers.contains_key(&bs) {
+                        stable_buffers.insert(
+                            bs,
+                            Tensor::zeros(out.shape(), out.dtype(), out.device())?,
+                        );
+                    }
                     #[cfg(feature = "cuda")]
                     if !should_capture {
                         device.synchronize()?;
@@ -915,7 +940,17 @@ impl<M: CudaGraphModule> GraphCapturer<M> {
                         &input_metadata,
                         false,
                     )?;
+                    // The logits live in the capture memory pool.  Copy them
+                    // into a buffer that was allocated before the capture
+                    // started, so that reading them after a replay does not
+                    // depend on the pool keeping the allocation alive.
+                    let stable = stable_buffers
+                        .get(&bs)
+                        .expect("stable output buffer must be pre-allocated")
+                        .clone();
+                    stable.copy_(&out, 0)?;
                     outputs.insert(bs, out);
+                    stable_outputs.insert(bs, stable);
                 }
                 if std::env::var("XINFER_DIAG_GRAPH").is_ok() {
                     eprintln!("[diag][graph] phase={:?} bs={} forward done", phase, bs);
@@ -952,6 +987,7 @@ impl<M: CudaGraphModule> GraphCapturer<M> {
             #[cfg(feature = "flashinfer")]
             flashinfer_last_len,
             outputs,
+            stable_outputs,
         });
 
         Ok(())
@@ -1096,7 +1132,13 @@ impl<M: CudaGraphModule> GraphCapturer<M> {
                     eprintln!("[diag][graph] replay bs={batch} input_batch={input_batch}");
                 }
 
-                graph_vars.outputs[&batch]
+                // Read from the stable buffer: the tensor that was produced
+                // during the capture lives in the graph memory pool, which the
+                // driver may release after every launch.
+                graph_vars
+                    .stable_outputs
+                    .get(&batch)
+                    .unwrap_or(&graph_vars.outputs[&batch])
                     .narrow(0, 0, input_batch)?
                     .contiguous()
             } else {
