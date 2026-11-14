@@ -1176,18 +1176,18 @@ impl ModelRunner {
                             head.shape(),
                             k.shape()
                         );
-                        // Scan every block one at a time to find out where the
-                        // new token actually landed.
-                        let nblocks = k.dim(0)?;
-                        let mut touched = Vec::new();
-                        for b in 0..nblocks {
-                            let blk = k.narrow(0, b, 1)?;
-                            let s = blk.to_dtype(DType::F32)?.sum_all()?.to_scalar::<f32>()?;
-                            if s.abs() > 1e-6 {
-                                touched.push((b, s));
-                            }
-                        }
-                        crate::log_info!("[diag][kv] touched blocks: {:?}", &touched[..touched.len().min(12)]);
+                        // Per-entry sums of the first block: shows which slot
+                        // of the block actually received the new token.
+                        let blk0 = k.narrow(0, 0, 1)?;
+                        let entries: Vec<f32> = (0..32)
+                            .map(|e| {
+                                blk0.narrow(1, e, 1)
+                                    .and_then(|t| t.to_dtype(DType::F32))
+                                    .and_then(|t| t.sum_all())
+                                    .and_then(|t| t.to_scalar::<f32>())
+                            })
+                            .collect::<Result<Vec<f32>>>()?;
+                        crate::log_info!("[diag][kv] block0 entries: {:?}", entries);
                     }
                 }
                 let output_ids = self.sample(&logits, seqs, is_prefill)?;
