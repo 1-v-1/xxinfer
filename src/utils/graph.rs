@@ -64,10 +64,20 @@ impl CudaGraph {
         // during the capture, see `set_capture_mem_pool`), which is what lets
         // the driver take ownership of them in the first place.
         let mut graph_exec = MaybeUninit::uninit();
+        // `XINFER_GRAPH_NO_AUTO_FREE=1` instantiates the graph without
+        // AUTO_FREE_ON_LAUNCH.  That flag makes the driver rewrite the
+        // pointers inside the kernel parameters of every launch, which is
+        // exactly the mechanism that could send the KV cache write to the
+        // wrong buffer.
+        let auto_free = std::env::var("XINFER_GRAPH_NO_AUTO_FREE").is_err();
         let mut params = sys::CUDA_GRAPH_INSTANTIATE_PARAMS {
             flags: flags
-                | sys::CUgraphInstantiate_flags::CUDA_GRAPH_INSTANTIATE_FLAG_AUTO_FREE_ON_LAUNCH
-                    as u64,
+                | if auto_free {
+                    sys::CUgraphInstantiate_flags::CUDA_GRAPH_INSTANTIATE_FLAG_AUTO_FREE_ON_LAUNCH
+                        as u64
+                } else {
+                    0
+                },
             hUploadStream: stream,
             ..Default::default()
         };
