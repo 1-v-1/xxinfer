@@ -1350,6 +1350,30 @@ impl<M: CudaGraphModule> GraphCapturer<M> {
                 if result.is_err() {
                     eprintln!("Error when replaying graph {:?}", result);
                 }
+                if std::env::var("XINFER_DIAG_OUT").is_ok() {
+                    // Compare the tensor the graph wrote into with the buffer
+                    // the caller actually reads.  If `out` holds data but
+                    // `stable` is empty, the copy inside the graph did not
+                    // land; if both are empty, the computation itself
+                    // produced nothing.
+                    let probe = |t: &Tensor| -> String {
+                        match t.flatten_all().and_then(|x| x.to_dtype(DType::F32)).and_then(|x| x.to_vec1::<f32>()) {
+                            Ok(v) => {
+                                let nz = v.iter().filter(|x| x.abs() > 1e-9).count();
+                                format!("n={} nonzero={} head={:?}", v.len(), nz, &v[..v.len().min(4)])
+                            }
+                            Err(e) => format!("err={e}"),
+                        }
+                    };
+                    let ordinal = self.device.as_ref().map(|d| d.ordinal()).unwrap_or(99);
+                    let stable = graph_vars.stable_outputs.get(&batch);
+                    let out = graph_vars.outputs.get(&batch);
+                    eprintln!(
+                        "[diag][out][o{ordinal}] bs={batch} stable[{}] out[{}]",
+                        stable.map(&probe).unwrap_or_default(),
+                        out.map(&probe).unwrap_or_default(),
+                    );
+                }
                 if std::env::var("XINFER_DIAG_KV").is_ok() {
                     #[cfg(feature = "flashinfer")]
                     {
