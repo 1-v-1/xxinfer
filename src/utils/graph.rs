@@ -933,18 +933,37 @@ impl<M: CudaGraphModule> GraphCapturer<M> {
         let slot_mapping = Tensor::zeros((max_bs,), DType::I64, device)?;
         let context_lens = Tensor::zeros((max_bs,), DType::U32, device)?;
         let block_tables = Tensor::zeros((max_bs, max_num_blocks), DType::U32, device)?;
+        // The captured graph must see the *same* KV shape as the replays it
+        // serves.  FlashInfer's split-kv decode partitions the work over the
+        // KV pages and records the partition in the plan (`o_indptr`,
+        // `kv_tile_indices`); a capture that pretends the request holds the
+        // whole `max_model_len` produces a plan with a different partition
+        // than any real decode step, and the decode attention then reads the
+        // wrong number of KV tiles.
+        //
+        // A real decode step contributes exactly one token, so its KV holds
+        // one page with one valid entry.
+        let capture_pages_per_req: u32 = if std::env::var("XINFER_CAPTURE_DECODE_SHAPE").is_ok()
+        {
+            1
+        } else {
+            max_num_blocks as u32
+        };
         #[cfg(feature = "flashinfer")]
         let (flashinfer_indptr, flashinfer_indices, flashinfer_last_len, last_len_host) = {
             let mut indptr = Vec::with_capacity(max_bs + 1);
             indptr.push(0u32);
-            let mut indices = Vec::with_capacity(max_bs * max_num_blocks);
-            for _ in 0..max_bs {
-                for i in 0..max_num_blocks {
-                    indices.push(i as u32);
+            let mut indices = Vec::with_capacity(max_bs * capture_pages_per_req as usize);
+            for i in 0..max_bs {
+                for j in 0..capture_pages_per_req {
+                    indices.push(j as u32);
                 }
                 indptr.push(indices.len() as u32);
+                let _ = i;
             }
-            let last = if self.max_model_len == 0 {
+            let last = if capture_pages_per_req == 1 {
+                1u32
+            } else if self.max_model_len == 0 {
                 0u32
             } else {
                 ((self.max_model_len - 1) % self.block_size + 1) as u32
@@ -953,7 +972,11 @@ impl<M: CudaGraphModule> GraphCapturer<M> {
 
             (
                 Tensor::from_vec(indptr, (max_bs + 1,), device)?,
-                Tensor::from_vec(indices, (max_bs * max_num_blocks,), device)?,
+                Tensor::from_vec(
+                    indices,
+                    (max_bs * capture_pages_per_req as usize,),
+                    device,
+                )?,
                 Tensor::from_vec(last_len.clone(), (max_bs,), device)?,
                 last_len,
             )
@@ -1003,7 +1026,7 @@ impl<M: CudaGraphModule> GraphCapturer<M> {
                     let mut indptr_host = Vec::with_capacity(bs + 1);
                     indptr_host.push(0u32);
                     for i in 0..bs {
-                        indptr_host.push(((i + 1) * max_num_blocks) as u32);
+                        indptr_host.push((i as u32 + 1) * capture_pages_per_req);
                     }
                     if std::env::var("XINFER_DIAG_GRAPH").is_ok() {
                         eprintln!(
@@ -1043,7 +1066,8 @@ impl<M: CudaGraphModule> GraphCapturer<M> {
                     Some(attention_rs::FlashInferMetadata {
                         indptr: flashinfer_indptr.narrow(0, 0, bs + 1)?,
                         indptr_host,
-                        indices: flashinfer_indices.narrow(0, 0, bs * max_num_blocks)?,
+                        indices: flashinfer_indices
+                            .narrow(0, 0, bs * capture_pages_per_req as usize)?,
                         last_len: flashinfer_last_len.narrow(0, 0, bs)?,
                         last_len_host: Some(last_len_host[..bs].to_vec()),
                         kv_len_arr_host,
