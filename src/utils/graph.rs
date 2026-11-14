@@ -1319,6 +1319,7 @@ impl<M: CudaGraphModule> GraphCapturer<M> {
                 if std::env::var("XINFER_DIAG_ADDR").is_ok() {
                     let addr = |t: &Tensor| -> u64 {
                         use candle_core::Storage;
+                        use candle_core::cuda_backend::cudarc::driver::DevicePtr;
                         let (st, l) = t.storage_and_layout();
                         match &*st {
                             Storage::Cuda(c) => {
