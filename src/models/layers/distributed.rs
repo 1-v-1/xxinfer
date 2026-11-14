@@ -50,6 +50,15 @@ impl Id {
 
 pub use std::rc::Rc;
 
+/// Diagnostic switch: `XINFER_SKIP_ALLREDUCE=1` turns the tensor-parallel
+/// collective into a no-op.  It exists to isolate the collective from the
+/// rest of the pipeline (a CUDA-graph capture cannot replay an NCCL
+/// collective), and it makes the output numerically wrong.
+fn skip_all_reduce() -> bool {
+    static SKIP: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *SKIP.get_or_init(|| std::env::var("XINFER_SKIP_ALLREDUCE").is_ok())
+}
+
 pub struct ReplicatedLinear {
     linear: Linear,
 }
@@ -608,7 +617,13 @@ impl TensorParallelRowLinear {
             // AllReduce supports F32/BF16/F16. Perform in native dtype to avoid
             // precision loss from F32→BF16 truncation before summation (critical
             // for GGUF QMatMul which outputs F32).
-            xs = xs.apply_op1_no_bwd(all_reduce)?;
+            //
+            // XINFER_SKIP_ALLREDUCE is a diagnostic switch: it drops the
+            // collective so that a CUDA-graph capture can be replayed without
+            // NCCL.  The result is numerically wrong on purpose.
+            if !skip_all_reduce() {
+                xs = xs.apply_op1_no_bwd(all_reduce)?;
+            }
         }
         if let Some(bias) = &self.bias {
             if bias.dtype() == xs.dtype() {
