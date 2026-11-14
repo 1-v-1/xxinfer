@@ -899,6 +899,9 @@ impl<M: CudaGraphModule> GraphCapturer<M> {
                     sequence_ids: None,
                     mamba_slot_mapping: Some(mamba_slot_mapping.narrow(0, 0, bs)?),
                     slot_mapping: slot_mapping.narrow(0, 0, bs)?,
+                    // TEST: an out-of-range slot makes the KV write kernel
+                    // fault, which proves whether the captured kernel runs
+                    // during a replay.
                     block_tables: Some(block_tables.narrow(0, 0, bs)?),
                     block_tables_host: None,
                     context_lens_host: None,
@@ -922,6 +925,18 @@ impl<M: CudaGraphModule> GraphCapturer<M> {
                     );
                 }
                 if should_capture {
+                    if std::env::var("XINFER_DIAG_BADSLOT").is_ok() {
+                        // Poison the slot mapping right before the capture so
+                        // that the captured KV write kernel writes out of
+                        // bounds.  A CUDA error during the replay then proves
+                        // that the kernel really runs.
+                        let poison = Tensor::from_vec(
+                            vec![999_999_999i64; bs],
+                            (bs,),
+                            slot_mapping.device(),
+                        )?;
+                        slot_mapping.copy_(&poison, 0)?;
+                    }
                     self.model.start_capture(bs)?;
                 }
                 if phase.is_warmup() {
