@@ -24,6 +24,7 @@ async fn main() -> std::process::ExitCode {
     match run().await {
         Ok(_code) => {
             let _ = std::io::stdout().flush();
+            let _ = std::io::stderr().flush();
             // _exit (not exit): skip C++ static destructors (cuBLAS global state
             // calls cuEventDestroy during teardown and segfaults inside libcuda).
             // Output is flushed above, so nothing is lost.
@@ -503,18 +504,39 @@ async fn run() -> Result<()> {
             } else {
                 xinfer::log_warn!("Starting the inference...");
 
+                // Fail-point exits: returning Err instead would unwind through
+                // `engine`'s CUDA handles (CudaBlas/CudaSlice drops) and
+                // secondary-crash in libcuda, hiding the real error.
                 let (preprocessed, tokenizer) = {
                     let e = engine.read();
-                    (
-                        e.preprocess(&params, &message_list, &Vec::new(), false)?,
-                        Arc::new(e.tokenizer.clone()),
-                    )
+                    match e.preprocess(&params, &message_list, &Vec::new(), false) {
+                        Ok(p) => (p, Arc::new(e.tokenizer.clone())),
+                        Err(err) => {
+                            eprintln!("{}", format!("Error: {err:?}").red());
+                            let _ = std::io::Write::flush(&mut std::io::stderr());
+                            unsafe { libc::_exit(1) };
+                        }
+                    }
                 };
                 let receivers = {
                     let mut e = engine.write();
-                    e.generate_sync(preprocessed, None, &None)?
+                    match e.generate_sync(preprocessed, None, &None) {
+                        Ok(r) => r,
+                        Err(err) => {
+                            eprintln!("{}", format!("Error: {err:?}").red());
+                            let _ = std::io::Write::flush(&mut std::io::stderr());
+                            unsafe { libc::_exit(1) };
+                        }
+                    }
                 };
-                let results = LLMEngine::collect_sync_results(receivers, tokenizer, None).await?;
+                let results = match LLMEngine::collect_sync_results(receivers, tokenizer, None).await {
+                    Ok(r) => r,
+                    Err(err) => {
+                        eprintln!("{}", format!("Error: {err:?}").red());
+                        let _ = std::io::Write::flush(&mut std::io::stderr());
+                        unsafe { libc::_exit(1) };
+                    }
+                };
                 // GenerationOutput is returned directly
                 results
             }
@@ -582,5 +604,9 @@ async fn run() -> Result<()> {
         }
     }
 
-    Ok(())
+    // Success: exit here. Returning Ok(()) would drop `engine`'s CUDA handles
+    // (cuBLAS/cuEventDestroy in static destructors) and secondary-crash.
+    let _ = std::io::Write::flush(&mut std::io::stdout());
+    let _ = std::io::Write::flush(&mut std::io::stderr());
+    unsafe { libc::_exit(0) }
 }

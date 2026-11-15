@@ -803,10 +803,14 @@ impl GatedDeltaNet {
         }
 
         let is_quantized = config.quantization_config.is_some();
-        // 1Cat semantics: the GDN kernels are half2-native; keeping the
-        // activations in the model dtype avoids four full-size F32 casts per
-        // layer (candle's generic cast runs at ~3 GB/s on strided views).
-        let gdn_dtype = dtype;
+        // Quantized (qvar) and f16-mode builds keep GDN state/weights in F32:
+        // the ported QPN kernels and the F32-sized state pool (see
+        // kvcache_allocator per_layer_recurrent_bytes) require it.
+        let gdn_dtype = if vb.is_qvar_builder() || config.is_f16_mode {
+            DType::F32
+        } else {
+            dtype
+        };
 
         let num_v_heads = num_v_heads_global / world_size;
         let num_k_heads = num_k_heads_global / world_size;

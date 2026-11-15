@@ -53,7 +53,12 @@ pub fn heartbeat_worker(
                         || e.kind() == std::io::ErrorKind::BrokenPipe
                     {
                         crate::log_info!("Parent process disconnected, exiting...");
-                        process::exit(0);
+                        // _exit (not exit): skip static destructors; the main
+                        // thread may still be inside CUDA calls and context
+                        // teardown here secondary-crashes (DEINITIALIZED).
+                        let _ = std::io::Write::flush(&mut std::io::stdout());
+                        let _ = std::io::Write::flush(&mut std::io::stderr());
+                        unsafe { libc::_exit(0) };
                     }
                     if heartbeat_error_count > 5 {
                         crate::log_error!(

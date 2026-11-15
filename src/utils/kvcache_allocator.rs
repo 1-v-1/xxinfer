@@ -1325,6 +1325,12 @@ impl KVCacheAllocator {
         // first runner is going to fill with the model.
         let device = CudaDevice::new(device_id)?;
         let _guard = PrimaryContextGuard::new(device_id);
+        // Leak both handles: on this vGPU driver, CudaDevice/CudaBlas teardown
+        // (cublasDestroy -> cuEventDestroy) segfaults, and primary_ctx release
+        // is pointless since the process _exits anyway. The pinned context only
+        // makes the runner's free-memory reading slightly more conservative.
+        std::mem::forget(device);
+        std::mem::forget(_guard);
 
         unsafe {
             let mut free: usize = 0;
@@ -1362,6 +1368,9 @@ impl KVCacheAllocator {
 
         let device = CudaDevice::new(device_id)?;
         let _guard = PrimaryContextGuard::new(device_id);
+        // Leak: handle teardown segfaults on this vGPU driver (see above).
+        std::mem::forget(device);
+        std::mem::forget(_guard);
         unsafe {
             let mut free: usize = 0;
             let mut total: usize = 0;
