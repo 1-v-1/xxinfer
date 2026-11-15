@@ -784,8 +784,16 @@ impl KVCacheAllocator {
             // CUDA graphs are captured.  Reserving it while the graphs are
             // disabled would take a second copy of the plan workspace out of
             // the KV budget for nothing.
+            // The graph slot is initialized by preallocate_graph_workspace,
+            // which applies the same SM70 reduction as the eager slot (the
+            // prefill float buffer is never touched on Volta), so reserving
+            // the full size here would over-reserve by ~248 MiB per card.
             let graph_bytes = if self.cuda_graph_enabled {
-                attention_rs::workspace::workspace_gpu_bytes()
+                if self.skip_eager_workspace {
+                    attention_rs::workspace::sm70_eager_workspace_gpu_bytes()
+                } else {
+                    attention_rs::workspace::workspace_gpu_bytes()
+                }
             } else {
                 0
             };
@@ -857,9 +865,13 @@ impl KVCacheAllocator {
         // `intermediate_size` each.  Sizing it with the hidden size
         // under-reserves by the ratio between the two, which on this model is
         // 17408 / 5120 = 3.4x.
+        // The gate/up projection output is the largest single intermediate:
+        // one concatenated tensor [chunk, 2 * intermediate], consumed
+        // immediately by the down projection.  The old 2x factor double-counted
+        // gate and up, which are already both inside the concatenated width.
         let ff_width = self.intermediate_size.max(self.hidden_size);
         let transient_bytes =
-            (2 * self.prefill_chunk_size * ff_width * self.model_dtype_size) as u64;
+            (self.prefill_chunk_size * ff_width * self.model_dtype_size) as u64;
 
         // MLA prefill materializes large per-token tensors that are not part of
         // the generic transient estimate: absorbed Q [N, heads, kv_rank], Q_PE,
