@@ -704,7 +704,8 @@ impl GatedDeltaNet {
             } => {
                 let mixed_qkvz = in_proj_qkvz.forward(xs)?;
                 let mixed_ba = in_proj_ba.forward(xs)?;
-                self.fix_qwen3next_projection_order(&mixed_qkvz, &mixed_ba)
+                let r = self.fix_qwen3next_projection_order(&mixed_qkvz, &mixed_ba);
+                r
             }
             GdnProjection::SplitQkvZaLegacy {
                 in_proj_qkv,
@@ -802,11 +803,10 @@ impl GatedDeltaNet {
         }
 
         let is_quantized = config.quantization_config.is_some();
-        let gdn_dtype = if vb.is_qvar_builder() || config.is_f16_mode {
-            DType::F32
-        } else {
-            dtype
-        };
+        // 1Cat semantics: the GDN kernels are half2-native; keeping the
+        // activations in the model dtype avoids four full-size F32 casts per
+        // layer (candle's generic cast runs at ~3 GB/s on strided views).
+        let gdn_dtype = dtype;
 
         let num_v_heads = num_v_heads_global / world_size;
         let num_k_heads = num_k_heads_global / world_size;

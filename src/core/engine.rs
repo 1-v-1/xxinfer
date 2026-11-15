@@ -29,7 +29,7 @@ use crate::utils::progress::{progress_worker, ProgressReporter};
 use crate::utils::progress::{spawn_progress_thread, ProgressLike};
 use crate::utils::{chat_template::ChatTemplate, prepare_engine_config};
 use crate::utils::{get_runner_path, init_config_tokenizer, spawn_runner};
-use crate::{log_info, log_warn};
+use crate::{log_debug, log_info, log_warn};
 use candle_core::{DType, Result};
 use colored::Colorize;
 use futures::future::join_all;
@@ -194,11 +194,13 @@ impl LLMEngine {
             false
         };
 
-        log_info!("{:?}", econfig);
+        // Full config dumps are ~2 KB each and only useful when debugging;
+        // keep them at debug level so a normal run stays readable.
+        log_debug!("{:?}", econfig);
 
-        log_info!("{:?}\n", config_tokenizer);
+        log_debug!("{:?}\n", config_tokenizer);
 
-        log_info!("{:?}\n", config);
+        log_debug!("{:?}\n", config);
 
         let device_ids = if let Some(ids) = &econfig.device_ids {
             log_info!("Using device IDs: {:?}", ids);
@@ -420,23 +422,26 @@ impl LLMEngine {
                     send_and_expect_ack(&mut stream, &init_msg, "initialize", global_rank)?;
 
                     // Always validate/plan allocation after model loading for accurate memory readings
-                    let ecfg = engine_config.get_or_init(|| {
-                        let mut econfig = econfig.clone();
-                        let allocator = KVCacheAllocator::new(&econfig, &config, dtype);
-                        // Propagate resolved dtype (e.g. TurboQuant → Auto on MLA) before plan/IPC.
-                        econfig.kvcache_dtype = allocator.resolved_kvcache_dtype();
-                        let device_ids = econfig.device_ids.clone().unwrap_or(vec![0]);
-                        match allocator.plan(&device_ids, &mut econfig) {
-                            Ok(_) => {
-                                crate::log_info!("KVCache allocation successfully planned!");
+                    let ecfg = match engine_config.get() {
+                        Some(c) => c.clone(),
+                        None => {
+                            let mut econfig = econfig.clone();
+                            let allocator = KVCacheAllocator::new(&econfig, &config, dtype);
+                            // Propagate resolved dtype (e.g. TurboQuant → Auto on MLA) before plan/IPC.
+                            econfig.kvcache_dtype = allocator.resolved_kvcache_dtype();
+                            let device_ids = econfig.device_ids.clone().unwrap_or(vec![0]);
+                            // Exit at the failure point: returning Err would unwind through
+                            // CUDA handles (CudaBlas/Context drops) and secondary-crash.
+                            if let Err(e) = allocator.plan(&device_ids, &mut econfig) {
+                                let _ = std::io::Write::flush(&mut std::io::stderr());
+                                eprintln!("{}", format!("KVCache plan failed: {e:?}"));
+                                unsafe { libc::_exit(1) };
                             }
-                            Err(e) => {
-                                crate::log_error!("Failed to allocate KVCache: {:?}", e);
-                                panic!("Failed to allocate KVCache: {:?}", e);
-                            }
+                            crate::log_info!("KVCache allocation successfully planned!");
+                            let _ = engine_config.set(econfig.clone());
+                            econfig
                         }
-                        econfig
-                    });
+                    };
 
                     send_and_expect_ack(
                         &mut stream,
@@ -462,7 +467,16 @@ impl LLMEngine {
                 config.kvcache_dtype = econfig.kvcache_dtype;
             }
 
-            let local_streams = runner_streams?;
+            let local_streams = match runner_streams {
+                Ok(s) => s,
+                Err(e) => {
+                    // Print the full error chain and exit without running static
+                    // destructors: CUDA context teardown here races still-alive worker
+                    // threads and secondary-crashes (SIGSEGV) would hide this message.
+                    crate::log_error!("Engine startup failed: {e:?}");
+                    std::process::exit(1);
+                }
+            };
 
             // Multi-node forward coordination setup
             if is_multi_node && node_rank == 0 {
@@ -2180,6 +2194,8 @@ impl LLMEngine {
             while seq.num_cached_tokens < seq.len() {
                 let remaining = seq.len() - seq.num_cached_tokens;
                 let chunk_tokens = std::cmp::min(chunk_size, remaining);
+                let t_chunk = std::time::Instant::now();
+                if std::env::var("XINFER_QPN2_PROBE").is_ok() { eprintln!("PROBE chunk_start cached={} chunk={}", seq.num_cached_tokens, chunk_tokens); }
                 let embedding_result = match &mut *self.runners.write() {
                     RunnerType::Thread(model_runner) => model_runner.embed(&[&seq], &strategy),
                     RunnerType::Process(ref mut runner_streams) => {
@@ -2317,6 +2333,7 @@ impl LLMEngine {
                     }
                 }
 
+                if std::env::var("XINFER_QPN2_PROBE").is_ok() { eprintln!("PROBE chunk_done {:?}", t_chunk.elapsed()); }
                 seq.num_cached_tokens += chunk_tokens;
                 processed_tokens += chunk_tokens;
                 if seq.len() > chunk_size {

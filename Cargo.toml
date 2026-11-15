@@ -39,6 +39,7 @@ bincode = { version = "1.3.1" }
 twox-hash = "2.1.1"
 rand = "0.9.0"
 rayon="1.10.0"
+libc = "0.2"
 clap = { version = "4.4.7", features = ["derive"] }
 thiserror = "1.0.58"
 schemars = "0.8"
@@ -161,3 +162,17 @@ assets = [
     ["target/release/xinfer", "usr/local/bin/", "755"],
     ["target/release/lib/*", "usr/local/lib/xinfer/", "644"],
 ]
+
+# DEV-ONLY: point the attention.rs git dependency at the local clone so that
+# kernel edits do not require a push (a push would invalidate the cudaforge
+# cache and trigger the full ~30 min rebuild). Remove before delivery.
+[patch."https://github.com/1-v-1/attention.rs.git"]
+attention-rs = { path = "/workspace/attention.rs" }
+
+# Panic during CUDA context teardown unwinds -> secondary SIGSEGV hides the real
+# message. Abort immediately: the panic message is printed, exit is clean.
+[profile.release]
+panic = "abort"
+[profile.test]
+inherits = "dev"
+panic = "abort"

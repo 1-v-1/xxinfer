@@ -470,6 +470,29 @@ impl CustomOp1 for AllReduce {
         let dev = s.device().clone();
         let start_offset = l.start_offset();
 
+        // Diagnostic (`XINFER_DIAG_NCCL=1`): count the tensor-parallel
+        // collectives and report whether the stream was being captured when
+        // they were issued.  A collective that is issued on a capturing stream
+        // has to end up as a node of the captured graph; if it does not, the
+        // replayed graph silently skips the reduction.
+        if std::env::var("XINFER_DIAG_NCCL").is_ok() {
+            use candle_core::cuda_backend::cudarc::driver::sys;
+            use candle_core::cuda_backend::cudarc::driver::sys::lib;
+            use std::sync::atomic::{AtomicUsize, Ordering};
+            static N: AtomicUsize = AtomicUsize::new(0);
+            let n = N.fetch_add(1, Ordering::Relaxed);
+            let mut status = sys::CUstreamCaptureStatus::CU_STREAM_CAPTURE_STATUS_NONE;
+            let st = dev.cu_stream().clone();
+            unsafe {
+                let _ = lib().cuStreamIsCapturing(st, &mut status).result();
+            }
+            if n < 3 || n % 32 == 0 {
+                eprintln!(
+                    "[diag][nccl] all_reduce #{n} capturing={status:?} elem_count={elem_count}"
+                );
+            }
+        }
+
         let dst = match s.dtype() {
             DType::BF16 => {
                 let full_slice = s.as_cuda_slice::<bf16>()?;
@@ -1307,16 +1330,11 @@ impl MergedParallelColumnLinear {
                         // model is several gigabytes per card.
                         #[cfg(feature = "cuda")]
                         let (blocks, scales, prepacked_sm70) = {
-                            let n = merged_blocks.dim(0)?;
                             let k = merged_blocks.dim(1)? * 2;
                             if nvfp4_sm == 70 && weight_scale_swizzled.is_none() && k % 16 == 0 {
-                                match attention_rs::nvfp4_linear::nvfp4_prepack_sm70(
+                                match attention_rs::nvfp4_linear::nvfp4_qpn2_prepack(
                                     &merged_blocks,
                                     &merged_scales,
-                                    nvfp4_global_scale,
-                                    None,
-                                    n,
-                                    k,
                                 ) {
                                     Ok((w, s)) => (w, s, true),
                                     Err(e) => {

@@ -20,6 +20,9 @@ struct Nvfp4MergedWeights {
     row_scales: Tensor,
     weight_scale_swizzled: Option<Tensor>,
     n: usize,
+    /// The blocks/scales were repacked into the SM70 QPN2 layout at load
+    /// time (the cat of two QPN2 tensors is the QPN2 of the cat).
+    prepacked_sm70: bool,
 }
 
 enum GateUpProjection {
@@ -152,6 +155,7 @@ impl MLP {
                     row_scales,
                     weight_scale_swizzled: swizzled,
                     n,
+                    prepacked_sm70: g.prepacked_sm70,
                 })
             }
             _ => GateUpProjection::Separate { gate_proj, up_proj },
@@ -656,17 +660,30 @@ impl MLP {
                 } else {
                     xs.clone()
                 };
-                let gate_up = attention_rs::nvfp4_linear::nvfp4_matmul(
-                    &x_2d,
-                    &m.blocks,
-                    &m.scales,
-                    m.gate_gscale,
-                    m.input_scale,
-                    None,
-                    crate::models::layers::linear::linear_is_prefill(),
-                    m.weight_scale_swizzled.as_ref(),
-                    Some(&m.row_scales),
-                )?;
+                let gate_up = if m.prepacked_sm70 {
+                    // QPN2 path: row_scales are the per-column global scales
+                    // the kernel folds into every block scale.
+                    attention_rs::nvfp4_linear::nvfp4_qpn2_matmul(
+                        &x_2d,
+                        &m.blocks,
+                        &m.scales,
+                        m.gate_gscale,
+                        Some(&m.row_scales),
+                        None,
+                    )?
+                } else {
+                    attention_rs::nvfp4_linear::nvfp4_matmul(
+                        &x_2d,
+                        &m.blocks,
+                        &m.scales,
+                        m.gate_gscale,
+                        m.input_scale,
+                        None,
+                        crate::models::layers::linear::linear_is_prefill(),
+                        m.weight_scale_swizzled.as_ref(),
+                        Some(&m.row_scales),
+                    )?
+                };
                 let leading: Vec<usize> = if orig_dims.len() > 2 {
                     orig_dims[..orig_dims.len() - 1].to_vec()
                 } else {

@@ -20,6 +20,7 @@ use crate::utils::progress::ProgressLike;
 use crate::utils::FlashInferKvParams;
 use crate::utils::{CpuKvCache, GpuKvCache};
 use crate::{
+    log_debug,
     core::sequence::{DecodeSequence, Sequence, ToDecodeInput},
     models::deepseek3::DeepSeekForCausalLM,
     models::deepseek4::DeepSeekV4ForCausalLM,
@@ -50,6 +51,28 @@ use parking_lot::RwLock;
 use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 use std::sync::{Arc, Mutex, MutexGuard};
+
+/// Number of decode steps that have been executed for the current request.
+///
+/// The counter is reset by the prefill and advanced by every decode step.  It
+/// is only used by the `XINFER_GRAPH_MAX_STEPS` diagnostic, which lets the
+/// CUDA graph serve the first few decode steps and then falls back to the
+/// eager path.  That separates "the graph computes something else" from "the
+/// graph leaves the state in a shape the eager path cannot use".
+thread_local! {
+    static DECODE_STEP: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+/// Diagnostic switch: use the CUDA graph for at most this many decode steps
+/// and fall back to the eager path afterwards.
+fn graph_max_steps() -> Option<u64> {
+    static MAX: std::sync::OnceLock<Option<u64>> = std::sync::OnceLock::new();
+    *MAX.get_or_init(|| {
+        std::env::var("XINFER_GRAPH_MAX_STEPS")
+            .ok()
+            .and_then(|v| v.parse::<u64>().ok())
+    })
+}
 
 /// Cached sampling parameters computed once during prefill, reused during decode
 #[derive(Clone, Debug)]
@@ -807,7 +830,7 @@ impl ModelRunner {
                 config.kvcache_dtype
             );
         } else {
-            crate::log_info!("Use flashinfer backend {:?}", flashinfer_kv_params);
+            crate::log_debug!("Use flashinfer backend {:?}", flashinfer_kv_params);
         }
 
         #[cfg(all(feature = "flashattn", not(feature = "flashinfer")))]
@@ -1074,6 +1097,78 @@ impl ModelRunner {
         }
     }
 
+    /// Print a checksum of the recurrent state and of the paged KV cache.
+    ///
+    /// The CUDA-graph replay and the eager path have to leave the *same*
+    /// state behind, otherwise the next step reads something else than the
+    /// eager path would have read.  Comparing these checksums step by step
+    /// between an eager run and a graph run shows whether the two paths
+    /// diverge in the KV cache, in the gated-delta-net state, or only in the
+    /// logits.
+    fn diag_state(&self, input_metadata: &InputMetadata) {
+        if std::env::var("XINFER_DIAG_STATE").is_err() {
+            return;
+        }
+        let sum = |t: &Tensor| -> Option<f32> {
+            t.to_dtype(DType::F32)
+                .ok()?
+                .sum_all()
+                .ok()?
+                .to_scalar::<f32>()
+                .ok()
+        };
+        let slot = input_metadata
+            .mamba_slot_mapping
+            .as_ref()
+            .and_then(|t| t.to_dtype(DType::I64).ok())
+            .and_then(|t| t.flatten_all().ok())
+            .and_then(|t| t.to_vec1::<i64>().ok())
+            .and_then(|v| v.first().copied());
+        // The gated-delta-net state of the first layer, both as a whole and
+        // restricted to the slot that the request owns.
+        let gdn = match &self.model {
+            Model::Qwen3VL(model) => model.lock_mamba_cache_for_graph().map(|cache| {
+                let conv_all = sum(cache.conv_state(0));
+                let rec_all = sum(cache.recurrent_state(0));
+                let (conv_slot, rec_slot) = match slot {
+                    Some(s) if s >= 0 => (
+                        sum(&cache.conv_state(0).narrow(0, s as usize, 1).unwrap_or_else(|_| {
+                            cache.conv_state(0).clone()
+                        })),
+                        sum(&cache.recurrent_state(0).narrow(0, s as usize, 1).unwrap_or_else(|_| {
+                            cache.recurrent_state(0).clone()
+                        })),
+                    ),
+                    _ => (None, None),
+                };
+                (conv_all, rec_all, conv_slot, rec_slot)
+            }),
+            Model::Qwen3_5(model) => {
+                let cache = model.lock_mamba_cache_for_graph();
+                Some((
+                    sum(cache.conv_state(0)),
+                    sum(cache.recurrent_state(0)),
+                    None,
+                    None,
+                ))
+            }
+            _ => None,
+        };
+        // The paged KV cache: the sum of the first block of the first layer.
+        let kv = {
+            let kv_guard = self.get_kv_cache();
+            kv_guard.as_pairs().and_then(|p| p.first()).map(|(k, _v)| {
+                let blocks = k.dim(0).unwrap_or(0);
+                let head = k.narrow(0, 0, 1).unwrap();
+                (sum(&head), blocks)
+            })
+        };
+        let step = DECODE_STEP.with(|c| c.get());
+        crate::log_info!(
+            "[diag][state] step={step} slot={slot:?} gdn={gdn:?} kv={kv:?}"
+        );
+    }
+
     fn restore_mamba_prefix_states_for_prefill(&self, seqs: &[&Sequence]) -> Result<()> {
         match &self.model {
             Model::Qwen3_5(_) | Model::Qwen3_5MoE(_) | Model::Qwen4(_) | Model::Qwen3VL(_) => {
@@ -1157,6 +1252,14 @@ impl ModelRunner {
     pub fn run(&self, seqs: Seqs, is_prefill: bool) -> Result<Vec<u32>> {
         #[cfg(feature = "nvtx")]
         nvtx::range_push!("{}", if is_prefill { "prefill" } else { "decoding" });
+        // The decode step counter is only read by the `XINFER_GRAPH_MAX_STEPS`
+        // diagnostic; the prefill resets it so that every request starts at
+        // step zero.
+        if is_prefill {
+            DECODE_STEP.with(|c| c.set(0));
+        } else {
+            DECODE_STEP.with(|c| c.set(c.get() + 1));
+        }
         let (input_ids, positions, mut input_metadata) = if is_prefill {
             match &seqs {
                 Seqs::SeqRefs(seqs) => self.prepare_prefill(seqs)?,
@@ -1197,8 +1300,15 @@ impl ModelRunner {
                 self.decode_capturer.is_captured(input_batch)
             };
             let can_replay = graph_enabled && captured;
+            // Diagnostic: let the graph serve only the first few decode steps
+            // and fall back to the eager path afterwards.  If the text after
+            // the switch is correct, the graph corrupts the state; if it is
+            // garbage as well, the graph's own computation is wrong.
+            let step = DECODE_STEP.with(|c| c.get());
+            let can_replay = can_replay
+                && graph_max_steps().map(|max| step < max).unwrap_or(true);
             if std::env::var("XINFER_DIAG_GRAPH").is_ok() {
-                crate::log_info!("[diag][graph] runner: is_prefill={is_prefill} can_replay={can_replay} batch={input_batch}");
+                crate::log_info!("[diag][graph] runner: is_prefill={is_prefill} can_replay={can_replay} batch={input_batch} step={step}");
             }
             if std::env::var("XINFER_DIAG_INPUTS").is_ok() {
                 // What does the graph actually get as input, and is there
@@ -1240,41 +1350,148 @@ impl ModelRunner {
                         );
                     }
                 }
-                let kv_guard = self.get_kv_cache();
-                if let Some((k, v)) = kv_guard.as_pairs().and_then(|p| p.first()) {
-                    if std::env::var("XINFER_DIAG_KVADDR").is_ok() {
-                        use candle_core::Storage;
-                        use candle_core::cuda_backend::cudarc::driver::DevicePtr;
-                        let ptr = |t: &Tensor| -> u64 {
-                            let (st, l) = t.storage_and_layout();
-                            match &*st {
-                                Storage::Cuda(c) => {
-                                    let base = match t.dtype() {
-                                        DType::F32 => c.as_cuda_slice::<f32>().map(|sl| *sl.device_ptr() as u64).unwrap_or(0),
-                                        DType::BF16 => c.as_cuda_slice::<half::bf16>().map(|sl| *sl.device_ptr() as u64).unwrap_or(0),
-                                        DType::F16 => c.as_cuda_slice::<half::f16>().map(|sl| *sl.device_ptr() as u64).unwrap_or(0),
-                                        _ => 0,
-                                    };
-                                    base.wrapping_add(l.start_offset() as u64 * t.dtype().size_in_bytes() as u64)
-                                }
-                                _ => 0,
-                            }
-                        };
-                        eprintln!("[diag][graph] runtime kv addr k={:#x} v={:#x}", ptr(&k), ptr(&v));
-                    }
-                    let sums: Vec<f32> = (0..3)
-                        .map(|b| {
-                            k.narrow(0, b, 1)
-                                .and_then(|x| x.to_dtype(DType::F32))
-                                .and_then(|x| x.sum_all())
-                                .and_then(|x| x.to_scalar::<f32>())
-                                .unwrap_or(0.0)
-                        })
-                        .collect();
-                    eprintln!("[diag][graph] kv block sums[0..3]={sums:?}");
-                }
             }
             if !is_prefill && can_replay {
+                // Diagnostic (`XINFER_DIAG_KV=1`): dump the paged KV cache of
+                // the first layer right before and right after the graph
+                // replay.  Comparing the two dumps shows whether the KV write
+                // kernel that is baked into the graph actually reaches the
+                // cache the runner owns, and whether the slot it writes is the
+                // one the runner asked for.
+                //
+                // The two tensor-parallel ranks write to the same stdout, so
+                // the dumps would interleave character by character.  Every
+                // rank therefore appends to its own file.
+                let diag_path = format!(
+                    "/tmp/kvdiag_{}_{}.log",
+                    std::process::id(),
+                    format!("{:?}", std::thread::current().id()).replace(['(', ')', ' '], "")
+                );
+                let dump_kv = |tag: &str| {
+                    if std::env::var("XINFER_DIAG_KV").is_err() {
+                        return;
+                    }
+                    use std::io::Write;
+                    let mut f = match std::fs::OpenOptions::new()
+                        .create(true)
+                        .append(true)
+                        .open(&diag_path)
+                    {
+                        Ok(f) => f,
+                        Err(e) => {
+                            eprintln!("[diag][kv][{tag}] open {diag_path} err {e}");
+                            return;
+                        }
+                    };
+                    let kv_guard = self.get_kv_cache();
+                    let Some((k, _v)) = kv_guard.as_pairs().and_then(|p| p.first()) else {
+                        let _ = writeln!(f, "[{tag}] no flash kv pairs");
+                        return;
+                    };
+                    use candle_core::Storage;
+                    use candle_core::cuda_backend::cudarc::driver::DevicePtr;
+                    let ptr = |t: &Tensor| -> u64 {
+                        let (st, l) = t.storage_and_layout();
+                        match &*st {
+                            Storage::Cuda(c) => {
+                                let base = match t.dtype() {
+                                    DType::F32 => c.as_cuda_slice::<f32>().map(|sl| *sl.device_ptr() as u64).unwrap_or(0),
+                                    DType::BF16 => c.as_cuda_slice::<half::bf16>().map(|sl| *sl.device_ptr() as u64).unwrap_or(0),
+                                    DType::F16 => c.as_cuda_slice::<half::f16>().map(|sl| *sl.device_ptr() as u64).unwrap_or(0),
+                                    _ => 0,
+                                };
+                                base.wrapping_add(l.start_offset() as u64 * t.dtype().size_in_bytes() as u64)
+                            }
+                            _ => 0,
+                        }
+                    };
+                    // The layer-0 cache is (num_blocks, block_size, kv_heads,
+                    // head_dim): narrow to block 0 and reduce over the two
+                    // trailing dimensions to get one number per slot.
+                    let blk = match k.narrow(0, 0, 1) {
+                        Ok(b) => b,
+                        Err(e) => {
+                            let _ = writeln!(f, "[{tag}] narrow err {e}");
+                            return;
+                        }
+                    };
+                    let per_slot = blk
+                        .to_dtype(DType::F32)
+                        .and_then(|x| x.sum_keepdim(1))
+                        .and_then(|x| x.sum_keepdim(1))
+                        .and_then(|x| x.flatten_all())
+                        .and_then(|x| x.to_vec1::<f32>());
+                    match per_slot {
+                        Ok(v) => {
+                            let rounded: Vec<f32> =
+                                v.iter().map(|s| (s * 1000.0).round() / 1000.0).collect();
+                            // Also dump every layer: in a hybrid GDN/full-attention
+                            // model only the full-attention layers write into
+                            // the paged KV cache, so a diff of layer 0 alone
+                            // says nothing.
+                            let mut layers: Vec<String> = Vec::new();
+                            for (li, (lk, _)) in kv_guard.as_pairs().unwrap().iter().enumerate() {
+                                let b = match lk.narrow(0, 0, 1) {
+                                    Ok(b) => b,
+                                    Err(_) => break,
+                                };
+                                let s = b
+                                    .to_dtype(DType::F32)
+                                    .and_then(|x| x.sum_keepdim(1))
+                                    .and_then(|x| x.sum_keepdim(1))
+                                    .and_then(|x| x.flatten_all())
+                                    .and_then(|x| x.to_vec1::<f32>())
+                                    .map(|v| {
+                                        v.iter()
+                                            .map(|s| (s * 1000.0).round() / 1000.0)
+                                            .collect::<Vec<f32>>()
+                                    })
+                                    .unwrap_or_default();
+                                layers.push(format!("L{li}({:#x}):{:?}", ptr(lk), s));
+                            }
+                            let _ = writeln!(
+                                f,
+                                "[{tag}] kptr={:#x} slots={:?} layers={:?}",
+                                ptr(&k),
+                                rounded,
+                                layers
+                            );
+                        }
+                        Err(e) => {
+                            let _ = writeln!(f, "[{tag}] read err {e}");
+                        }
+                    }
+                };
+                dump_kv("before");
+                {
+                    use std::io::Write;
+                    if std::env::var("XINFER_DIAG_KV").is_ok() {
+                        if let Ok(mut f) = std::fs::OpenOptions::new()
+                            .create(true)
+                            .append(true)
+                            .open(&diag_path)
+                        {
+                            let _ = writeln!(
+                                f,
+                                "[req] slot_mapping={:?} ctx_len={:?}",
+                                input_metadata
+                                    .slot_mapping
+                                    .to_dtype(DType::I64)
+                                    .ok()
+                                    .and_then(|x| x.flatten_all().ok())
+                                    .and_then(|x| x.to_vec1::<i64>().ok()),
+                                input_metadata
+                                    .context_lens
+                                    .as_ref()
+                                    .and_then(|c| {
+                                        c.to_dtype(DType::I64).ok().and_then(|x| {
+                                            x.flatten_all().ok().and_then(|x| x.to_vec1::<i64>().ok())
+                                        })
+                                    })
+                            );
+                        }
+                    }
+                }
                 let logits = match &self.model {
                     Model::Qwen3_5(model) => {
                         let _guard = model.lock_mamba_cache_for_graph();
@@ -1304,6 +1521,7 @@ impl ModelRunner {
                         .decode_capturer
                         .replay(&input_ids, &positions, &input_metadata)?,
                 };
+                dump_kv("after");
                 if std::env::var("XINFER_DIAG_COMPARE").is_ok() {
                     // Compare the graph replay against an eager forward with
                     // exactly the same inputs.  This separates "the graph
@@ -1485,6 +1703,7 @@ impl ModelRunner {
                         }
                     }
                 }
+                self.diag_state(&input_metadata);
                 let output_ids = self.sample(&logits, seqs, is_prefill)?;
                 return Ok(output_ids);
             }
@@ -1627,6 +1846,7 @@ impl ModelRunner {
             )?
         };
         drop(kv_guard);
+        self.diag_state(&input_metadata);
         let output_ids = self.sample(&logits, seqs, is_prefill)?;
         #[cfg(feature = "nvtx")]
         nvtx::range_pop!();

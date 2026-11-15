@@ -19,15 +19,38 @@ use xinfer::utils::config::{EngineConfig, SamplingParams};
 use xinfer::utils::get_dtype;
 
 #[tokio::main]
-async fn main() -> Result<()> {
+async fn main() -> std::process::ExitCode {
+    use std::io::Write;
+    match run().await {
+        Ok(_code) => {
+            let _ = std::io::stdout().flush();
+            // _exit (not exit): skip C++ static destructors (cuBLAS global state
+            // calls cuEventDestroy during teardown and segfaults inside libcuda).
+            // Output is flushed above, so nothing is lost.
+            unsafe { libc::_exit(0) }
+        }
+        Err(e) => {
+            eprintln!("{}", format!("Error: {e:?}").red());
+            let _ = std::io::stderr().flush();
+            unsafe { libc::_exit(1) }
+        }
+    }
+}
+
+async fn run() -> Result<()> {
     // When invoked as `xinfer runner --sock ... --uuid ...`, run the GPU worker subprocess.
     let args: Vec<String> = std::env::args().collect();
     if args.len() > 1 && args[1] == "runner" {
         let runner_args: Vec<String> = std::iter::once(args[0].clone())
             .chain(args[2..].iter().cloned())
             .collect();
-        xinfer::runner::run_runner_process(runner_args)
-            .map_err(|e| candle_core::Error::Msg(format!("{e}")))?;
+        if let Err(e) = xinfer::runner::run_runner_process(runner_args) {
+            // Print and exit(1) immediately: returning Err instead would unwind
+            // through the CUDA context teardown, which races still-alive worker
+            // threads and secondary-crashes (SIGSEGV) before the message flushes.
+            eprintln!("{}", format!("Runner startup failed: {e:?}").red());
+            unsafe { libc::_exit(1) };
+        }
         return Ok(());
     }
     tracing_subscriber::fmt()

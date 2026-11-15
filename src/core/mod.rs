@@ -61,6 +61,22 @@ macro_rules! log_info {
 }
 
 #[macro_export]
+macro_rules! log_debug {
+    ($($arg:tt)*) => {
+        {
+            #[cfg(feature = "python")]
+            {
+                let _ = format!($($arg)*);
+            }
+            #[cfg(not(feature = "python"))]
+            {
+                tracing::debug!($($arg)*);
+            }
+        }
+    };
+}
+
+#[macro_export]
 macro_rules! log_warn {
     ($($arg:tt)*) => {
         {

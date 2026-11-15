@@ -1852,17 +1852,13 @@ impl LnNvfp4 {
             // shape; using the global `out_dim`/`in_dim` would allocate a
             // weight that is as large as the unsharded one, which on a 27B
             // model is several gigabytes per card.
-            let n = blocks.dim(0)?;
             let k = blocks.dim(1)? * 2;
             if sm == 70 && weight_scale_swizzled.is_none() && k % 16 == 0 {
-                match attention_rs::nvfp4_linear::nvfp4_prepack_sm70(
-                    &blocks,
-                    &scales,
-                    global_scale,
-                    None,
-                    n,
-                    k,
-                ) {
+                // QPN2 layout (1Cat): a permutation of the same bytes, so the
+                // global scale stays a runtime argument (uniform here, per
+                // column for the merged gate/up path) and the byte count is
+                // unchanged.
+                match attention_rs::nvfp4_linear::nvfp4_qpn2_prepack(&blocks, &scales) {
                     Ok((w, s)) => (w, s, true),
                     Err(e) => {
                         candle_core::bail!("failed to prepack NVFP4 weights for SM70: {e}");
@@ -1898,17 +1894,30 @@ impl Module for LnNvfp4 {
             x.clone()
         };
 
-        let result = attention_rs::nvfp4_linear::nvfp4_matmul(
-            &x_2d,
-            &self.blocks,
-            &self.scales,
-            self.global_scale,
-            self.input_scale,
-            self.bias.as_ref(),
-            linear_is_prefill(),
-            self.weight_scale_swizzled.as_ref(),
-            None,
-        )?;
+        let result = if self.prepacked_sm70 {
+            // QPN2 path (1Cat): blocks/scales are in the QPN2 layout and the
+            // global scale is applied inside the kernel.
+            attention_rs::nvfp4_linear::nvfp4_qpn2_matmul(
+                &x_2d,
+                &self.blocks,
+                &self.scales,
+                self.global_scale,
+                None,
+                self.bias.as_ref(),
+            )?
+        } else {
+            attention_rs::nvfp4_linear::nvfp4_matmul(
+                &x_2d,
+                &self.blocks,
+                &self.scales,
+                self.global_scale,
+                self.input_scale,
+                self.bias.as_ref(),
+                linear_is_prefill(),
+                self.weight_scale_swizzled.as_ref(),
+                None,
+            )?
+        };
 
         if orig_dims.len() > 2 {
             let mut new_dims = orig_dims[..orig_dims.len() - 1].to_vec();

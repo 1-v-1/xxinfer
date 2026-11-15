@@ -16,6 +16,18 @@ use std::ptr;
 use std::sync::Arc;
 use tqdm::tqdm;
 
+/// Whether the capture is wrapped in an NCCL group.
+///
+/// `XINFER_NCCL_GROUP=0` issues every collective on its own.  NCCL then
+/// launches it straight onto the capturing stream, so the collective becomes
+/// a node of the graph.  With the group, NCCL aggregates the collectives of
+/// one capture and launches the aggregate on an internal stream, which does
+/// not end up in the graph at all.
+fn nccl_group_enabled() -> bool {
+    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ENABLED.get_or_init(|| std::env::var("XINFER_NCCL_GROUP").map(|v| v != "0").unwrap_or(true))
+}
+
 #[allow(dead_code)]
 pub struct CudaGraph {
     cu_graph: sys::CUgraph,
@@ -137,6 +149,76 @@ impl CudaGraph {
                 *counts.entry(name).or_insert(0) += 1;
             }
             eprintln!("[diag][graph] captured graph has {num_nodes} nodes: {counts:?}");
+
+            // Deep dump: kernel function names + the pointer arguments of the
+            // KV-write kernels. Used by `XINFER_DIAG_NODES=1` to find out
+            // whether the KV cache write is part of the captured graph at all.
+            if std::env::var("XINFER_DIAG_NODES").is_ok() {
+                let mut names: BTreeMap<String, usize> = BTreeMap::new();
+                let mut details: Vec<String> = Vec::new();
+                for node in nodes.iter().take(num_nodes) {
+                    let mut kind = sys::CUgraphNodeType::CU_GRAPH_NODE_TYPE_EMPTY;
+                    if lib().cuGraphNodeGetType(*node, &mut kind).result().is_err() {
+                        continue;
+                    }
+                    if kind != sys::CUgraphNodeType::CU_GRAPH_NODE_TYPE_KERNEL {
+                        continue;
+                    }
+                    let mut params = sys::CUDA_KERNEL_NODE_PARAMS::default();
+                    if lib()
+                        .cuGraphKernelNodeGetParams_v2(*node, &mut params)
+                        .result()
+                        .is_err()
+                    {
+                        continue;
+                    }
+                    let mut fname: *const std::os::raw::c_char = ptr::null();
+                    if lib().cuFuncGetName(&mut fname, params.func).result().is_err() {
+                        continue;
+                    }
+                    let name = std::ffi::CStr::from_ptr(fname).to_string_lossy().to_string();
+                    *names.entry(name.clone()).or_insert(0) += 1;
+                    if !name.contains("cache") && !name.contains("reshape") {
+                        continue;
+                    }
+                    let mut args: Vec<String> = Vec::new();
+                    if !params.kernelParams.is_null() {
+                        for i in 0..16usize {
+                            let mut off = 0usize;
+                            let mut size = 0usize;
+                            if lib()
+                                .cuFuncGetParamInfo(params.func, i, &mut off, &mut size)
+                                .result()
+                                .is_err()
+                            {
+                                break;
+                            }
+                            let p = *params.kernelParams.add(i);
+                            if p.is_null() {
+                                break;
+                            }
+                            let v = if size == 4 {
+                                *(p as *const u32) as u64
+                            } else {
+                                *(p as *const u64)
+                            };
+                            args.push(format!("a{i}={v:#x}"));
+                        }
+                    }
+                    details.push(format!(
+                        "{name} grid={}x{}x{} blk={} args=[{}]",
+                        params.gridDimX,
+                        params.gridDimY,
+                        params.gridDimZ,
+                        params.blockDimX,
+                        args.join(" ")
+                    ));
+                }
+                eprintln!("[diag][nodes] kernel histogram: {names:?}");
+                for d in details {
+                    eprintln!("[diag][nodes] {d}");
+                }
+            }
         }
     }
 
@@ -561,18 +643,15 @@ where
         // and connecting it to the capturing stream with events, and the
         // event dependencies only come out right when the collectives of one
         // capture belong to a single `ncclGroupStart`/`ncclGroupEnd` region.
-        // With one collective per group -- which is what an ungrouped
-        // all-reduce gives -- the captured graph ends up with a single wait
-        // event instead of one per collective, the all-reduce is left
-        // incomplete, and the two ranks end up with different logits.
         //
-        // The group has to be opened *before* the capture starts and closed
-        // *inside* it, so that the aggregated collective kernels are the ones
-        // that get recorded into the graph.  Without the group the captured
-        // graph contains an all-reduce that never completes: the first replay
-        // then deadlocks with the peer rank inside the NCCL kernel (both GPUs
-        // spin at 100% SM with no memory traffic).
-        if self.world_size > 1 {
+        // `XINFER_NCCL_GROUP=0` opens no group at all: each collective is
+        // then issued on its own and NCCL launches it straight onto the
+        // capturing stream, which is the only way it becomes a node of the
+        // graph.  With the group, NCCL aggregates the 128 all-reduces of one
+        // step and launches the aggregate on its own internal stream, so the
+        // captured graph contains no reduction at all and the replayed logits
+        // are the unreduced per-rank shards.
+        if self.world_size > 1 && nccl_group_enabled() {
             #[cfg(feature = "nccl")]
             candle_core::cuda_backend::cudarc::nccl::safe::group_start()
                 .map_err(|e| candle_core::Error::Msg(format!("ncclGroupStart failed: {e:?}")))?;
@@ -595,7 +674,7 @@ where
         // Close the NCCL group while the capture is still active: NCCL only
         // launches the aggregated collective kernels at `ncclGroupEnd`, and
         // those launches are the ones that have to end up inside the graph.
-        if self.world_size > 1 {
+        if self.world_size > 1 && nccl_group_enabled() {
             #[cfg(feature = "nccl")]
             candle_core::cuda_backend::cudarc::nccl::safe::group_end()
                 .map_err(|e| candle_core::Error::Msg(format!("ncclGroupEnd failed: {e:?}")))?;
@@ -1487,6 +1566,59 @@ impl<M: CudaGraphModule> GraphCapturer<M> {
                 graph_vars.slot_mapping.zero_()?;
                 graph_vars.slot_mapping.copy_(&s_mapping, 0)?;
 
+                // Diagnostic (`XINFER_DIAG_KV=1`): write what the captured
+                // kernels will actually read into a per-rank file.  The
+                // tensor-parallel ranks share stdout, so the dumps would
+                // interleave character by character.
+                if std::env::var("XINFER_DIAG_KV").is_ok() {
+                    use candle_core::Storage;
+                    use candle_core::cuda_backend::cudarc::driver::DevicePtr;
+                    use std::io::Write;
+                    let path = format!(
+                        "/tmp/kvdiag_{}_{}.log",
+                        std::process::id(),
+                        format!("{:?}", std::thread::current().id()).replace(['(', ')', ' '], "")
+                    );
+                    if let Ok(mut f) = std::fs::OpenOptions::new()
+                        .create(true)
+                        .append(true)
+                        .open(&path)
+                    {
+                        let dev_ptr = |t: &Tensor| -> u64 {
+                            let (st, l) = t.storage_and_layout();
+                            match &*st {
+                                Storage::Cuda(c) => {
+                                    let base = match t.dtype() {
+                                        DType::I64 => c.as_cuda_slice::<i64>().map(|sl| *sl.device_ptr() as u64).unwrap_or(0),
+                                        DType::U32 => c.as_cuda_slice::<u32>().map(|sl| *sl.device_ptr() as u64).unwrap_or(0),
+                                        DType::F32 => c.as_cuda_slice::<f32>().map(|sl| *sl.device_ptr() as u64).unwrap_or(0),
+                                        DType::BF16 => c.as_cuda_slice::<half::bf16>().map(|sl| *sl.device_ptr() as u64).unwrap_or(0),
+                                        DType::F16 => c.as_cuda_slice::<half::f16>().map(|sl| *sl.device_ptr() as u64).unwrap_or(0),
+                                        _ => 0,
+                                    };
+                                    base.wrapping_add(l.start_offset() as u64 * t.dtype().size_in_bytes() as u64)
+                                }
+                                _ => 0,
+                            }
+                        };
+                        let to_i64 = |t: &Tensor| -> Option<Vec<i64>> {
+                            t.to_dtype(DType::I64)
+                                .ok()
+                                .and_then(|x| x.flatten_all().ok())
+                                .and_then(|x| x.to_vec1::<i64>().ok())
+                        };
+                        let _ = writeln!(
+                            f,
+                            "[gvars] graph_slot={:?} src_slot={:?} graph_slot_ptr={:#x} src_slot_ptr={:#x} gv_shape={:?}",
+                            to_i64(&graph_vars.slot_mapping),
+                            to_i64(s_mapping),
+                            dev_ptr(&graph_vars.slot_mapping),
+                            dev_ptr(s_mapping),
+                            graph_vars.slot_mapping.shape()
+                        );
+                    }
+                }
+
                 let c_lens = input_metadata.context_lens.as_ref().unwrap();
                 graph_vars.context_lens.zero_()?;
                 graph_vars.context_lens.copy_(&c_lens, 0)?;
@@ -1622,6 +1754,25 @@ impl<M: CudaGraphModule> GraphCapturer<M> {
                         addr(&graph_vars.input_ids),
                         addr(&graph_vars.slot_mapping),
                     );
+                }
+
+                // Diagnostic (`XINFER_DIAG_POISON_REPLAY=<slot>`): overwrite the
+                // slot mapping with a different value right before the graph
+                // is launched.  With an out-of-range value the KV write kernel
+                // writes far out of bounds and the launch fails with an
+                // illegal-address error, which proves that the kernel runs
+                // during a replay.  With a *valid* slot the kernel writes
+                // somewhere else in the cache, which shows exactly which
+                // block the captured kernel actually targets.
+                if let Ok(v) = std::env::var("XINFER_DIAG_POISON_REPLAY") {
+                    let slot: i64 = v.parse().unwrap_or(999_999_999);
+                    let poison = Tensor::from_vec(
+                        vec![slot; graph_vars.slot_mapping.dim(0)?],
+                        graph_vars.slot_mapping.shape(),
+                        graph_vars.slot_mapping.device(),
+                    )?;
+                    graph_vars.slot_mapping.zero_()?;
+                    graph_vars.slot_mapping.copy_(&poison, 0)?;
                 }
 
                 let result = self.model.replay(batch);
