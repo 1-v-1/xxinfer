@@ -197,6 +197,8 @@ pub struct KVCacheAllocator {
     kv_fraction: f64,
     kvcache_dtype: crate::utils::config::KvCacheDtype,
     cpu_mem_fold: f32,
+    /// Concurrent-sequence cap: batched prefill transients scale with it.
+    max_num_seqs: usize,
     dtype_size: usize,
     model_dtype_size: usize,
     hybrid_mamba_slot_bytes: Option<usize>,
@@ -741,6 +743,7 @@ impl KVCacheAllocator {
             moe_num_experts_per_tok,
             is_moe,
             prefill_chunk_size: econfig.effective_prefill_chunk_size(),
+            max_num_seqs: econfig.max_num_seqs,
             use_flashinfer_workspace: uses_flashinfer_workspace(econfig, config),
             cuda_graph_enabled: !econfig.disable_cuda_graph,
             skip_eager_workspace: is_volta(),
@@ -866,12 +869,16 @@ impl KVCacheAllocator {
         // under-reserves by the ratio between the two, which on this model is
         // 17408 / 5120 = 3.4x.
         // The gate/up projection output is the largest single intermediate:
-        // one concatenated tensor [chunk, 2 * intermediate], consumed
-        // immediately by the down projection.  The old 2x factor double-counted
-        // gate and up, which are already both inside the concatenated width.
+        // one concatenated tensor [tokens, 2 * intermediate] (gate and up are
+        // already both inside the concatenated width), consumed immediately
+        // by the down projection.  Batched prefill carries up to
+        // `max_num_seqs` sequences of `prefill_chunk_size` tokens each, so the
+        // peak scales with the number of concurrent sequences, not with a
+        // fixed factor.
         let ff_width = self.intermediate_size.max(self.hidden_size);
-        let transient_bytes =
-            (self.prefill_chunk_size * ff_width * self.model_dtype_size) as u64;
+        let transient_bytes = ((self.max_num_seqs.max(1) * self.prefill_chunk_size) as u64)
+            * ff_width as u64
+            * self.model_dtype_size as u64;
 
         // MLA prefill materializes large per-token tensors that are not part of
         // the generic transient estimate: absorbed Q [N, heads, kv_rank], Q_PE,
