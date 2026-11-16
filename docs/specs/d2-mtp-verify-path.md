@@ -5,7 +5,7 @@
 
 ## 1. 现象与已知事实
 - **现象（上游文档口径）**：`docs/moe_offload.md:54` —— "MTP (`--num-speculative-tokens`) works but was slower in our tests."。这是本件要判生死的原始读数。
-- **真模型实测：MTP 开比关快 31.3%**（`unsloth/Qwen3.8-27B-NVFP4`，64 层 / hidden 5120 / vocab 248320 / `mtp_num_hidden_layers=1`；§5.1，5/5 wins）⇒ 原始读数在能跑通的配置上**不复现**。
+- **真模型实测：现象复现的条件是"上下文长度"，不是"开不开"**：短上下文（24 tok）MTP 开 +34%；768-token 上下文 MTP 开 **−25.3%**（§5.3）。cli 侧 1024 上限下测到的 +31.3%（§5.1）是这两端的混合读数。
 - **要让真模型跑通，先踩过两颗雷**：
   1. `--d 0,1` 加载期 `CUDA_ERROR_ILLEGAL_ADDRESS`（`cudarc …/driver/safe/core.rs:275`），落在 `e7fa54b` 的 world-2 oneshot allreduce 上；`XINFER_ONESHOT_DISABLE=1` 一关就好（本件全部读数都在关掉它的条件下取）。
   2. MTP 开启要从 KV 预算额外扣 `XINFER_MTP_RESERVE_MB`（默认 1024 MB/卡，`src/utils/kvcache_allocator.rs:905-913`）+ 快照下限抬到 4（`src/models/layers/deltanet.rs:1001`）；22 GB 权重 /2 之后剩余不够，报 `Available: 0.00 MB, Required: 32.00 MB, Reserved: 512.00 MB`。本件用 `--max-model-len 1024 XINFER_MTP_RESERVE_MB=128` 才跑通 ⇒ **A6 已证实为"挤掉上下文"而非"变慢"**。
@@ -58,3 +58,21 @@
 
 ### 5.2 作废：8 层假模型的一轮
 `/data/qwen3_5_8layer`（TP1/bf16）曾出 +15.1%（4/4 wins）。该 checkpoint 不是本件目标，数字只留作对照，不作结论。
+
+### 5.3 `d2#1` 走 OpenAI API 的矩阵：单发/并发 × 小/大上下文（2026-11-16，`tests/probes/mtp_api_perf_probe.py`）
+测量条件：同一模型、`--d 0,1`、`--dtype f16`、贪心（`temperature 0`/`top_k 1`）、`stream=true`、`XINFER_ONESHOT_DISABLE=1`、`XINFER_MTP_RESERVE_MB=128`、`--mamba-fraction 0.35`、`--prefill-chunk-size=<该格 mml>`、**关图**、时钟未锁。每格一台服务，`--max-num-seqs` = 该格并发，`mml = ctx + 256 + 64`。
+
+| 格 | MTP 关（解码段 tok/s） | MTP 开(K=3) | 差 |
+|---|---|---|---|
+| 单发 × 小上下文（24 tok） | 45.5 | 61.2–61.6 | **+34%** |
+| 单发 × 大上下文（768 tok） | 45.96 | 34.34 | **−25.3%** |
+| 并发 4 × 小上下文 | 起不来 | 起不来 | — |
+| 并发 4 × 大上下文 | 起不来 | 起不来 | — |
+
+⇒ **现象复现了，但不在"并发"这一维，而在"上下文长度"这一维**：短上下文 MTP +34%，768-token 上下文上 MTP −25.3%。TTFT：小上下文 off 214.9 ms / on 32.7 ms；大上下文 off 455.1 ms / on 402.9 ms。
+
+并发格起不来的两条原因（都未解）：
+- 关图时 hybrid 状态槽位容量塌到 1：`MambaCache: no free slots (max_batch_size=1), increase preallocated capacity`（`mamba_cache_capacity` 默认取 `hybrid_mamba_graph_capture_max_batch(max_num_parallel_reqs)`，`src/core/runner.rs:624-632`）。
+- 开图时预算不够：`GPU Memory Budget: 1.45 GB available → 0.57 GB workspace reserve (FlashInfer 520M + Transient 68M) → 0.87 GB for caches` ⇒ `GPU memory is insufficient for one prefill chunk after KV-cache, Mamba, attention, and graph buffers`。
+
+⚠ 首轮大上下文格曾因 needle 提示词让模型只答 8 个 token 而失真（`chunks=8`）；改成"再写至少 200 词"后重取才是上表。
