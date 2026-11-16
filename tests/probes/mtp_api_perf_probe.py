@@ -41,7 +41,8 @@ OUT = os.path.join(os.environ.get("XINFER_PROBE_DIR", "/workspace/probe-out"), "
 
 def env_for(mtp_on):
     e = dict(os.environ)
-    e.update(HF_HUB_OFFLINE="1", XINFER_ONESHOT_DISABLE="1", XINFER_MTP_RESERVE_MB="128")
+    e.update(HF_HUB_OFFLINE="1", XINFER_ONESHOT_DISABLE="1", XINFER_MTP_RESERVE_MB="128",
+             XINFER_DIAG_LOGITS="1", XINFER_DIAG_MTP="1")
     if OK == "0":
         e["XINFER_DISABLE_CUDA_GRAPH"] = "1"
     return e

@@ -76,3 +76,23 @@
 - 开图时预算不够：`GPU Memory Budget: 1.45 GB available → 0.57 GB workspace reserve (FlashInfer 520M + Transient 68M) → 0.87 GB for caches` ⇒ `GPU memory is insufficient for one prefill chunk after KV-cache, Mamba, attention, and graph buffers`。
 
 ⚠ 首轮大上下文格曾因 needle 提示词让模型只答 8 个 token 而失真（`chunks=8`）；改成"再写至少 200 词"后重取才是上表。
+
+## 6. `d2#3` 一步多 token 的哨兵 `-1`（用户实测：并发无 MTP、单发开 MTP 都无限吐 4294967295）
+
+**共同点 = 一个 step 里 token 数 > 1。** 引擎里"每条序列一份"的元数据与"每个 token 一份"的元数据是两条不同长度的轴：
+
+| 轴 | 长度 | 出处 |
+|---|---|---|
+| 序列轴 | 序列数 | `mamba_slot_mapping`（`attention.rs/src/mamba_cache.rs:475` `get_slots_for_sequences`）、`block_tables`、`context_lens`、`cu_seqlens_*` |
+| token 轴 | token 数 | `input_ids`、`positions`、`slot_mapping`、`batch_indices` |
+
+- 并发无 MTP：`prepare_decode` 每条序列 push 一份（`src/core/runner.rs:2238-2242`），N>1 时两轴才不等长。
+- MTP 单发：`build_verify_metadata` 里 token 轴长 `q_len = K+1`，槽位只给 1 个（`src/speculative/metadata.rs:49`，且用 `get_`（只读不建）而非 `ensure_`）。
+- `batch=1` 且非 MTP 时两轴都是 1，永远重合 ⇒ 从不暴露。
+
+**为什么打印成 4294967295**：贪心（`temperature 0`/`top_k 1`）走的是 CUDA 快路（`sample_with_strategy` → `sample_cuda`，`src/utils/logits_processor.rs:295-301`），核里"没选中过任何有效下标"就写哨兵：stage A 越界下标写 `i[it] = -1`（`gpu_sampling.cu:139`），stage B 以 `topi[t] = -1` 初始化（`:191`），`picked = topi[0]` 兜底（`:269-272`）。`i32 -1` 被 `Vec<u32>` 打成 4294967295。所以打印的不是 token，是"这一行 logits 根本没被认成有效行"。
+
+**修法（按优先级）**
+1. 把序列轴→token 轴的展开做成显式一步：产出 `seq_of_token`，让 `slot_mapping[t] = slots[seq_of_token[t]]`，并在两处入口断言 `slot_mapping.len() == input_ids.len()`、`mamba_slot_mapping.len() == seqs.len()`。
+2. `build_verify_metadata` 改用 `ensure_mamba_slots_for_sequences`（与 prefill 一致），别在 verify 里 `get_`。
+3. 采样侧加硬闸：核写 `valid` 标志或调用方检出哨兵就报错，NaN logits 必须显式失败，不许静默出 token（D9 的日志门控走 `XINFER_DIAG_*`）。
