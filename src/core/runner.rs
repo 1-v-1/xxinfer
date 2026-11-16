@@ -353,6 +353,13 @@ impl ModelRunner {
         self.flashinfer_kv_params
     }
 
+    /// How many draft tokens a verify step carries, i.e. each verify batch has
+    /// `1 + this` query rows per sequence.  Read here rather than passed in so
+    /// the shape checks cannot drift from the configured step length.
+    pub(crate) fn num_speculative_tokens(&self) -> usize {
+        self.config.num_speculative_tokens.unwrap_or(0)
+    }
+
     pub(crate) fn prepare_mamba_slot_mapping(
         &self,
         sequence_ids: &[usize],
@@ -2663,6 +2670,17 @@ impl ModelRunner {
                 .as_cuda_device()
                 .map(|d| d.ordinal())
                 .unwrap_or(usize::MAX);
+            // The sampler kernels write `-1` into the output for a row they did
+            // not recognise as valid; printed as u32 that is 4294967295.  Treat it
+            // as a hard failure instead of letting it out as a token.
+            if let Some(&bad) = tokens.iter().find(|&&t| t == usize::MAX) {
+                crate::log_error!(
+                    "[sample][ordinal {ordinal}] sentinel {bad} from a row that was not a valid query row"
+                );
+                candle_core::bail!(
+                    "Sampler returned the sentinel {bad} (i32 -1) on ordinal {ordinal}: the verify batch's per-token row was not produced"
+                );
+            }
             crate::log_info!(
                 "[diag][ordinal {}] sampled token ids: {:?}",
                 ordinal,

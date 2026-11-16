@@ -45,6 +45,22 @@ impl ModelRunner {
         slot_mappings: &[i64],
         q_len: usize,
     ) -> Result<InputMetadata> {
+        // Pin the two axes the way the reference does: the verify batch carries
+        // exactly `1 + num_speculative_tokens` query rows per sequence, and the
+        // per-token buffers must be that long.  A mismatch here used to surface
+        // only at sampling time, as the `-1` row sentinel.
+        let per_seq_query_rows = self.num_speculative_tokens() + 1;
+        if q_len != per_seq_query_rows {
+            candle_core::bail!(
+                "Speculative verify shape mismatch: q_len={q_len} but 1 + num_speculative_tokens={per_seq_query_rows}"
+            );
+        }
+        if slot_mappings.len() != q_len {
+            candle_core::bail!(
+                "Speculative verify per-token buffers disagree: slot_mappings={} input_rows={q_len}",
+                slot_mappings.len()
+            );
+        }
         let total_kv_len = (seq_info.len + q_len) as u32;
         let mamba_slot_mapping = self.prepare_mamba_slot_mapping(&[seq_info.id], false)?;
 
