@@ -274,3 +274,16 @@ MTP accept: proposed=3 accepted=0 first_mismatch=Some(0) draft=[0, 0, 0] target=
 所以这条链到此闭合：MTP 在这个移植上**从来没通过** —— 草稿头没产出有效 token，每步纯付 `draft 5.28 + verify 32.27 ms` 换 anchor+bonus。§12/§15/§16 三条内核路径的争论全都是次要的。
 
 下一步是查 `draft_tokens_gpu` 为什么返回 0（MTP 头权重没加载 / 输入 hidden 是 0 / argmax 取到了 pad 行），不是再调内核。
+
+## 20. 为什么 draft 全 0：权重侧已排掉一半，剩一条待测
+
+| 已核实 | 证据 |
+|---|---|
+| 检查点里**有** mtp 权重 | 索引里 **15** 个 mtp 张量：`mtp.fc.weight`、`mtp.layers.0.input_layernorm.weight` … |
+| 头**确实**按前缀取权重 | `qwen3_5_mtp.rs:224 let prefix = "mtp.";` + `:227 vb.pp(&mtp_block_prefix)` |
+| 头有"权重在不在"自查 | `:56 keys.iter().any(|key| vb.has_key(key))` |
+| 但配置里 `mtp_enabled: false` | 用户那份 TP4 日志的 `Config` 回显：`mtp_enabled: false, mtp_max_verify_tokens: 0` |
+
+`argmax` 对**全相等**（全 0）的 logits 返回下标 **0** —— 与 §19 的 `draft=[0,0,0]` 完全一致。所以最可能是：`has_mtp_weights` 判假 → 头走了未初始化/零权重分支，或 `mtp_enabled=false` 让权重根本没被接上。
+
+下一轮的唯一探针：在 `draft_tokens_gpu` 入口打 `initial_hidden` 的 min/max/mean/nan 与 `has_mtp_weights` 的返回值。若 hidden 非 0 而 logits 全 0，就是权重分支；若 hidden 全 0，问题在 step1 的返回。
