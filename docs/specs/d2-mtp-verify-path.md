@@ -329,3 +329,27 @@ mtp.norm.weight                    mtp.layers.0.{mlp.*,self_attn.*}.weight
 模型是 nvfp4（`quant_method: "nvfp4"`），`is_qvar_builder()` 为真 ⇒ 代码去找 `mtp.nextn.hnorm.weight`，而检查点里只有 `mtp.pre_fc_norm_hidden.weight`。`:236-238` 那句注释"MTP 不继承骨干的 NVFP4 设置、`mtp_config.quant = None`"说明 mtp 权重是未量化 F16，但**取名的键仍跟着 qvar 分支走了**。
 
 ⇒ 这就是 §21 说的"权重分支没接上"的具体形态：**键名分支选错，norm 权重取不到**。
+
+## 23. §22 那条改动实测无效 —— 目标未达成（round 12 收尾）
+
+按 §22 改了 `qwen3_5_mtp.rs:223`：
+
+```rust
+let is_qvar_builder = vb.is_qvar_builder()
+    && !has_any_key(vb, &["mtp.pre_fc_norm_hidden.weight"]);
+```
+
+重跑矩阵（`--d 0,1`，真实 27B）：
+
+| 格 | 改前 | 改后 |
+|---|---|---|
+| ctx=24, mtp=1, c=1 | 59.9 | **60.1 / 60.7** |
+| **ctx=768, mtp=1, c=1** | 32.4 | **32.6 / 32.6** |
+| mtp=0 四格 | — | 仍 `server not ready` |
+
+⇒ 大上下文那格 **32.4 → 32.6**，几乎没动，**没到 ≥43.7**。
+
+所以 §22 的"键名分支选错"即便成立，也不是 `accepted=0` 的成因；或者 `has_any_key` 在这里根本没按那个全名命中（它按 builder 的相对名解析）。
+
+**未证伪的还剩**：`forward_step` 里 `hidden_out` 是否全相等（§21 留的那一步没做）。
+**结构性障碍**：`mtp=0` 四格在这台两卡机上始终起不来（`max_parallel_reqs()==0` / KV 池开不出来），所以"单发/并发 × 大小上下文"的完整矩阵从来没有可比的两边。

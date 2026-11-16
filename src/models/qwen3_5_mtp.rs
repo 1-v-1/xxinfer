@@ -220,7 +220,11 @@ impl Qwen3_5MtpHead {
         device: &Device,
     ) -> Result<Self> {
         let hidden_size = config.hidden_size;
-        let is_qvar_builder = vb.is_qvar_builder();
+        // The mtp weights in the checkpoint are unquantised F16 and use the plain
+        // `mtp.*` names (`mtp.pre_fc_norm_hidden`), not the qvar `nextn.*` scheme, so the
+        // naming scheme must follow what is actually present, not the backbone format.
+        let is_qvar_builder = vb.is_qvar_builder()
+            && !has_any_key(vb, &["mtp.pre_fc_norm_hidden.weight"]);
         let prefix = "mtp.";
         let mtp_block_prefix = config.num_hidden_layers.to_string();
         let mtp_vb = if is_qvar_builder {
