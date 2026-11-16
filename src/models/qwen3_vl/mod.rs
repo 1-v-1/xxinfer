@@ -27,6 +27,17 @@ pub enum Qwen3TextModel {
     MoE35(Qwen3_5MoEForCausalLM),
 }
 
+impl Qwen3TextModel {
+    pub fn embed_lookup(&self) -> Box<dyn Fn(&Tensor) -> candle_core::Result<Tensor> + 'static> {
+        match self {
+            Self::Dense(m) => m.embed_lookup(),
+            Self::MoE(m) => m.embed_lookup(),
+            Self::Dense35(m) => m.embed_lookup(),
+            Self::MoE35(m) => m.embed_lookup(),
+        }
+    }
+}
+
 struct LazyVisionInit {
     auxiliary_gguf_path: Option<PathBuf>,
     safetensors_paths: Option<Vec<PathBuf>>,
@@ -838,10 +849,9 @@ impl Qwen3VLForConditionalGeneration {
     ///
     /// The table is split across the ranks, so this is the local shard and
     /// not the whole vocabulary.
-    pub fn embed_table(&self) -> Option<(candle_core::Tensor, usize, usize)> {
-        let w = self.embed_weight()?;
-        let rows = w.dim(0).unwrap();
-        Some((w, 0, rows))
+    pub fn embed_lookup(&self) -> Box<dyn Fn(&Tensor) -> candle_core::Result<Tensor> + 'static> {
+        let w = self.embed_weight().unwrap();
+        Box::new(move |t: &Tensor| -> candle_core::Result<Tensor> { w.index_select(&t.flatten_all()?, 0) })
     }
 
     pub fn embed_weight(&self) -> Option<candle_core::Tensor> {

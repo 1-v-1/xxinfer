@@ -527,7 +527,7 @@ impl Qwen3_5MtpHead {
         initial_hidden: &Tensor,
         anchor_token_tensor: &Tensor,
         num_tokens: usize,
-        embed_table: &(Tensor, usize, usize),
+        embed_lookup: &dyn Fn(&Tensor) -> Result<Tensor>,
         lm_head_fn: impl Fn(&Tensor) -> Result<Tensor>,
         positions_base: usize,
     ) -> Result<(Vec<u32>, Tensor)> {
@@ -549,36 +549,11 @@ impl Qwen3_5MtpHead {
         let mut current_token_t = anchor_token_tensor.reshape((1,))?;
 
         for step in 0..num_tokens {
-            let token_embed = { let (tbl, off, rows) = (&embed_table.0, embed_table.1, embed_table.2);
-                let ids = current_token_t.to_dtype(DType::U32)?;
-                let off_t = Tensor::from_slice(&[off as u32], (1,), tbl.device())?
-                    .broadcast_as(ids.shape())?;
-                let local = ids.broadcast_sub(&off_t)?;
-                let last = Tensor::from_slice(&[(rows as u32).saturating_sub(1)], (1,), tbl.device())?
-                    .broadcast_as(local.shape())?;
-                let in_range = local.broadcast_le(&last)?.to_dtype(local.dtype())?;
-                let local = local.broadcast_mul(&in_range)?;
-                tbl.index_select(&local, 0)?.broadcast_mul(&in_range.to_dtype(tbl.dtype())?)? };
-
+            let token_embed = embed_lookup(&current_token_t)?;
             let pos = (positions_base + step) as i64;
             let positions = Tensor::from_vec(vec![pos], (1,), &self.device)?;
-
             let hidden_out = self.forward_step(&current_hidden, &token_embed, &positions)?;
-
             let logits = lm_head_fn(&hidden_out.to_dtype(self.dtype)?)?;
-            if crate::utils::env::diag_mtp() {
-                let h = hidden_out.flatten_all().and_then(|t| t.to_dtype(DType::F32)).and_then(|t| t.to_vec1::<f32>()).map(|v| {
-                    let nz = v.iter().filter(|x| x.abs() > 1e-9).count();
-                    let sum: f32 = v.iter().map(|x| x.abs()).sum();
-                    format!("n={} nonzero={} absmean={:.3e}", v.len(), nz, sum / v.len().max(1) as f32)
-                }).unwrap_or_else(|e| format!("<err {e}>"));
-                let l = logits.flatten_all().and_then(|t| t.to_dtype(DType::F32)).and_then(|t| t.to_vec1::<f32>()).map(|v| {
-                    let nz = v.iter().filter(|x| x.abs() > 1e-9).count();
-                    let sum: f32 = v.iter().map(|x| x.abs()).sum();
-                    format!("n={} nonzero={} absmean={:.3e}", v.len(), nz, sum / v.len().max(1) as f32)
-                }).unwrap_or_else(|e| format!("<err {e}>"));
-                crate::log_debug!("MTP head step {step}: hidden_out {h}; logits {l}");
-            }
             let logits_last = if logits.dims().len() == 2 {
                 logits.get(logits.dim(0)? - 1)?
             } else {

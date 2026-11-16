@@ -233,12 +233,10 @@ impl ModelRunner {
         }
 
         // Step 2: Draft K tokens using MTP head (GPU-resident, no per-step CPU sync)
-        let embed_table = match self.model() {
-            Model::Qwen3_5(m) => m.embed_table(),
-            Model::Qwen3_5MoE(m) => m.embed_table(),
-            Model::Qwen3VL(m) => m
-                .embed_table()
-                .expect("Qwen3VL MTP requires Qwen3.5 text backbone"),
+        let embed_lookup = match self.model() {
+            Model::Qwen3_5(m) => m.embed_lookup(),
+            Model::Qwen3_5MoE(m) => m.embed_lookup(),
+            Model::Qwen3VL(m) => m.embed_lookup(),
             _ => unreachable!(),
         };
         let lm_head_fn = |hidden: &Tensor| -> Result<Tensor> {
@@ -257,7 +255,7 @@ impl ModelRunner {
             &seq_hidden,
             &anchor_token_tensor,
             num_draft,
-            &embed_table,
+            &embed_lookup,
             lm_head_fn,
             base_position,
         )?;
@@ -436,12 +434,10 @@ impl ModelRunner {
         seq_infos: &[SpecSeqInfo],
         mtp_head: Arc<Qwen3_5MtpHead>,
     ) -> Result<Vec<Vec<u32>>> {
-        let embed_table = match self.model() {
-            Model::Qwen3_5(m) => m.embed_table(),
-            Model::Qwen3_5MoE(m) => m.embed_table(),
-            Model::Qwen3VL(m) => m
-                .embed_table()
-                .expect("Qwen3VL MTP requires Qwen3.5 text backbone"),
+        let embed_lookup = match self.model() {
+            Model::Qwen3_5(m) => m.embed_lookup(),
+            Model::Qwen3_5MoE(m) => m.embed_lookup(),
+            Model::Qwen3VL(m) => m.embed_lookup(),
             _ => unreachable!(),
         };
         let lm_head_fn = |hidden: &Tensor| -> Result<Tensor> {
@@ -471,7 +467,7 @@ impl ModelRunner {
                 &seq_hidden,
                 &anchor_tensor,
                 self.mtp_num_speculative,
-                &embed_table,
+                &embed_lookup,
                 &lm_head_fn,
                 base_position,
             )?;

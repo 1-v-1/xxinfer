@@ -658,6 +658,11 @@ impl Qwen3_5MoEForCausalLM {
         (w, 0, rows)
     }
 
+    pub fn embed_lookup(&self) -> Box<dyn Fn(&Tensor) -> candle_core::Result<Tensor> + 'static> {
+        let e = self.embed_tokens.embeddings().clone();
+        Box::new(move |t: &Tensor| -> candle_core::Result<Tensor> { e.index_select(&t.flatten_all()?, 0) })
+    }
+
     pub fn embed_weight(&self) -> &Tensor {
         self.embed_tokens.embeddings()
     }

@@ -1706,6 +1706,7 @@ fn native_vocab_quant_config(
     has_native_quantized_weight.then(|| quant_cfg.clone())
 }
 
+#[derive(Clone)]
 #[allow(dead_code)]
 pub struct AllGather {
     comm: Rc<Comm>,
@@ -1988,6 +1989,11 @@ impl VocabParallelEmbedding {
     /// The embedding rows this rank holds.
     /// `(row_offset, rows)` for this rank: the draft head must shift global
     /// token ids down to local rows exactly like `forward` does.
+    /// The cross-shard gather this table was built with, if any.
+    pub fn gather_part(&self) -> Option<&AllGather> {
+        self.all_gather.as_ref()
+    }
+
     pub fn shard_geometry(&self) -> (usize, usize) {
         (self.row_offset, self.rows)
     }

@@ -483,6 +483,11 @@ impl Qwen3MoEForCausalLM {
         })
     }
 
+    pub fn embed_lookup(&self) -> Box<dyn Fn(&Tensor) -> candle_core::Result<Tensor> + 'static> {
+        let e = self.embed_tokens.embeddings().clone();
+        Box::new(move |t: &Tensor| -> candle_core::Result<Tensor> { e.index_select(&t.flatten_all()?, 0) })
+    }
+
     pub fn embed_forward(&self, xs: &Tensor) -> Result<Tensor> {
         let xs = self.embed_tokens.forward(xs)?;
         if (self.is_qvar_builder || self.config.quant.is_some()) && xs.dtype() != DType::F32 {
