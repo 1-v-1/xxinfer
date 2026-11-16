@@ -23,7 +23,7 @@ import urllib.request
 
 ANSI = re.compile(r"\x1b\[[0-9;]*[a-z]")
 BIN = os.environ.get("BIN", "/workspace/xxinfer/target/release/xinfer")
-MODEL = os.environ.get("MODEL", "unsloth/Qwen3.8-27B-NVFP4")
+MODEL = os.environ.get("MODEL", "tiny-random/Qwen3.5")
 K = int(os.environ.get("K", "3"))
 ROUNDS = int(os.environ.get("ROUNDS", "1"))
 CONC = int(os.environ.get("CONC", "2"))
@@ -51,7 +51,7 @@ def env_for(mtp_on):
 def args_for(mtp_on, mml, seqs):
     a = [BIN, "--m", MODEL, "--dtype", DTYPE, "--d", DEVS, "--max-model-len", str(mml),
           "--max-num-seqs", str(seqs), "--mamba-fraction", MFRAC,
-          "--prefill-chunk-size", str(mml)]
+          "--prefill-chunk-size", str(mml), "--ignore-eos"]
     if OK == "0":
         a += ["--disable-cuda-graph"]
     if mtp_on:
