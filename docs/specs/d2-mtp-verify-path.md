@@ -435,3 +435,38 @@ pub fn forward(&self, tokens: &Tensor) -> Result<Tensor> {   // :1936
 TP2、`vocab_size 248320`、`shard_indices: Some((0, 1))` —— 条件完全成立。
 
 **修法**：`draft_tokens_gpu` 收 `&VocabParallelEmbedding` 并调它的 `forward(tokens)`，而不是收 `Tensor` 再自己 `index_select`。
+
+## 28. §27 坐实 + 剩余改动的确切形状
+
+`distributed.rs:1909-1910`（分片构造）：
+
+```rust
+let rows = vocab_size / world_size;      // 248320 / 2 = 124160
+let row_offset = rank * rows;            // rank 1 → 124160
+```
+
+而 `forward` 用的是 `local = (ids − row_offset) · in_range`（§27）。草稿拿 `embed_weight()` 原样 + 全局 id ⇒ rank 1 上查的是**错的那半张表** ⇒ NaN（§25）。
+
+### 为什么 round 19 没做完
+
+`draft_tokens_gpu` 收的是裸 `Tensor`，而三个 variant 的嵌入是**两种类型**：
+
+| variant | 字段类型 |
+|---|---|
+| `Qwen3_5` | `VocabParallelEmbedding`（有 `row_offset`/`rows`）|
+| `Qwen3_5MoE` | `candle_nn::Embedding`（无分片）|
+
+`match` 的臂要返回同一类型，硬塞会污染契约。
+
+### 剩余改动（小、可验）
+
+`draft_tokens_gpu` 多收一个 `row_offset: usize`，查表处按 §27 那样先减偏移再掩蔽：
+
+```rust
+let ids = current_token_t.to_dtype(DType::U32)?;
+let off = Tensor::from_slice(&[row_offset as u32], (1,), dev)?;
+let local = ids.broadcast_sub(&off)?.broadcast_mul(
+    &ids.broadcast_sub(&off)?.broadcast_le(&Tensor::from_slice(&[rows as u32 - 1], (1,), dev)?)?)?;
+```
+
+`Qwen3_5` 传 `embed_tokens.row_offset()`，MoE 传 `0`。这是加一个入参，不是改 `Model` 的契约。
