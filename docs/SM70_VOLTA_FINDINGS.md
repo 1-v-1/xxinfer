@@ -1,7 +1,7 @@
 # SM70 / Volta (V100) 移植与 CUDA Graph 诊断结论
 
 > 本文是 `unsloth/Qwen3.8-27B-NVFP4` 在 **2× Tesla V100-SXM2-16GB** 上的可复用结论。
-> 详细的逐次尝试流水在仓库根目录的 `PROGRESS_PORT.md`；本文只保留**结论、命令、开关与坑**。
+> 逐次尝试不再单列流水文档；本文只保留**结论、命令、开关与坑**，过程证据进 `specs/` 对应那份规格。
 > 1Cat/vLLM（`/Volumes/SMB重要/1Cat-vLLM`）是本项目的对照实现。
 
 ---
@@ -68,7 +68,7 @@ cargo build --release --features cuda,nccl,flashinfer
 | **重写 SM70 decode GEMV**（"一个 warp 一列"） | **10.16 → 36.14 tok/s** | `attention.rs` `ba78b00` |
 | fused SiLU-and-mul | 35.55 → **36.13 tok/s** | `mlp.rs` `6830d86` |
 
-**GEMV 重写要点**（1Cat dense decode 思路的 SM70 化，详见 `PROGRESS_PORT.md` attempt 168）：
+**GEMV 重写要点**（1Cat dense decode 思路的 SM70 化；下一步变体见 [specs/d1-nvfp4-qpn2-splitk.md](<./specs/d1-nvfp4-qpn2-splitk.md>)）：
 1. 先定位：模型是 mixed-precision，**NVFP4 只覆盖 42% 的线性层**，FP8 占 51%、lm_head BF16 占 11%。
    两个 GEMM 原先只跑到带宽上限的 **8~12%**（FP8 94.8 GB/s、NVFP4 105.2 GB/s，上限 ~800 GB/s），
    累加 ≈112 ms/step，与实测 ~98 ms/step 吻合 ⇒ **两个 GEMM 吃掉几乎全部 decode 时间**。
