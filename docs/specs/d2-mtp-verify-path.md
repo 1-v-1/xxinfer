@@ -397,3 +397,23 @@ let token_embed = embed_weight.index_select(&current_token_t, 0)?;
 `embed_weight` 在 nvfp4 模型上是**量化张量**，`index_select` 直接按行切片量化块 ≠ 反量化后取值 ⇒ 查出来是 NaN。
 
 `cat([norm_embed, norm_hidden])` 之后整段被污染，`fc` → `layer` → `norm` 全 NaN，`argmax(全 NaN)=0` ⇒ `draft=[0,0,0]`。
+
+## 26. 修点定了：草稿拿的是**量化后的** `embed_weight()`
+
+`mtp.rs:236-240` 把主干的 `embed_weight()` 直接递给 `draft_tokens_gpu`：
+
+```rust
+let embed_weight = match self.model() {
+    Model::Qwen3_5(m) => m.embed_weight(),
+    ...
+};
+```
+
+而主干自己前向时**不是**这么用的 —— 它经 `qwen3_5.rs:715/732` 的 `index_select`，作用在**已经过 qvar 机制反量化过的** `xs` 上。`embed_weight()` 返回的是原始张量；nvfp4 下它是打包的量化块，按行 `index_select` 切出来的不是那一行的值 ⇒ NaN（§25）。
+
+检查点里 mtp 那 15 个张量**不含** embedding，MTP 必须复用主干嵌入，所以修法只有两条：
+
+1. 让草稿这条路拿到**反量化后**的嵌入行（和主干前向同一条路径）；
+2. 或在头内先 `dequantize` 再查表。
+
+两者都要动 `draft_tokens_gpu` 的入参类型，不是改一行能验完的 —— 留到有预算的一轮做。
