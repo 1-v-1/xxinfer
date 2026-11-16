@@ -1023,8 +1023,11 @@ impl KVCacheAllocator {
             .saturating_mul(self.prefill_chunk_size.max(1) as u64)
             .max(1);
         let kv_parallel_limit = max_kv_cache_tokens / self.prefill_chunk_size.max(1);
+        // `available_memory` is raw free memory, and `kv_cache_bytes + mamba_bytes`
+        // were already sized out of (free − workspace reserve).  Subtracting the
+        // reserve a second time here made `remaining − fixed_runtime` hit 0 on a
+        // 2-GPU box that has plenty, and the caller bails on `max_parallel == 0`.
         let memory_parallel_limit = remaining
-            .saturating_sub(fixed_runtime)
             .checked_div(per_request_prefill)
             .unwrap_or(0) as usize;
         let parallel_limit = kv_parallel_limit.min(memory_parallel_limit);
