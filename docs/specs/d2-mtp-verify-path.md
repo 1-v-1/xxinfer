@@ -234,3 +234,22 @@ tokens/step = 0.0609 × 32.4 = 1.97
 所以 −25.6% 的根因不是"verify 走哪个内核"（§16 已证伪两条），是**草稿和主模型对不上**。
 
 下一步该查的是 `verify.rs:46-57` 那条贪心前缀匹配与 draft 的 token 序，不是内核路径。
+
+## 18. 贪心前缀匹配是**对齐的** —— §17 的"形状错位"假设不被代码支持
+
+读 `mtp.rs:278-281` + `verify.rs:41-53`：
+
+```rust
+let mut verify_tokens = vec![anchor_token];
+verify_tokens.extend_from_slice(&draft_tokens);   // [anchor, d0..d{K-1}]，长 K+1
+...
+let target_vec = all_logits.argmax(Minus1)?;      // 行 j = 位置 seq.len+j 的预测
+compare_len = num_proposed.min(num_positions);    // = K
+for i in 0..compare_len { if target_vec[i] == draft_tokens[i] { .. } }
+```
+
+行 0 是 anchor 那一行，它预测的正是 `d0`；所以 `target_vec[i]` 对 `draft_tokens[i]` 是**同一个位置**。索引对齐，没有 off-by-one。
+
+⇒ §17 说的"两边的 i 不是同一个 token"这条**不成立**，别再顺着它找。
+
+剩下的唯一解释是草稿本身与主模型不符（MTP 头输出错），而那需要一个直接量：**第一次不匹配时把 draft[i] 与 target_vec[i] 一起打出来**。没有这个数，"接受率≈0"仍然只是从吞吐反推的，不是测出来的。
