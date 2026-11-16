@@ -262,6 +262,8 @@ impl ModelRunner {
             base_position,
         )?;
         if dbg {
+            // `draft_tokens` is already a host vec: the D2H inside it is the drain,
+            // so this window covers the draft steps' own GPU work.
             crate::log_debug!(
                 "MTP draft {} tok in {:.2} ms",
                 num_draft,

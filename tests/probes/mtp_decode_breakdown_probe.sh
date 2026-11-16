@@ -12,14 +12,14 @@
 set -uo pipefail
 
 BIN=${BIN:-/workspace/xxinfer/target/release/xinfer}
-MODEL=${MODEL:-/data/qwen3_5_8layer}
+MODEL=${MODEL:-unsloth/Qwen3.8-27B-NVFP4}
 K=${K:-3}
 ROUNDS=${ROUNDS:-5}
 TOKENS=${TOKENS:-512}
 MML=${MML:-8192}
 # 并行度：TP2 目前踩在 oneshot allreduce 的非法地址上（见 §1），本件先用 TP1 取数。
-DEVS=${DEVS:-0}
-DTYPE=${DTYPE:-bf16}
+DEVS=${DEVS:-0,1}
+DTYPE=${DTYPE:-f16}
 # 只在模型需要时传（171GB 的 MoE 检查点才需要 auto）。
 OFFLOAD=${OFFLOAD:-}
 OUT="${XINFER_PROBE_DIR:-/workspace/probe-out}/mtp-decode-breakdown"
@@ -28,7 +28,7 @@ PROMPT=${PROMPT:-'Explain in one short paragraph why a cache-bounded GPU spends 
 
 mkdir -p "$OUT"
 {
-  echo "model=$MODEL  dtype=$DTYPE  devices=$DEVS  max_model_len=$MML  moe_offload=${OFFLOAD:-unset}"
+  echo "model=$MODEL  dtype=$DTYPE  devices=$DEVS  max_model_len=$MML  moe_offload=${OFFLOAD:-unset}  oneshot=disabled(e7fa54b 在 TP2 加载期非法地址)"
   echo "max_tokens=$TOKENS  temperature=0  ignore_eos=1  k=$K  rounds=$ROUNDS  extra_args=${BASE:-none}"
   echo "clocks=$(nvidia-smi --query-gpu=clocks.current.sm,clocks.max.sm --format=csv,noheader 2>/dev/null | tr '\n' ' ') (未锁：容器内无权限改时钟)"
 } > "$OUT/conditions.txt"
@@ -36,7 +36,8 @@ mkdir -p "$OUT"
 # 一次完整运行。第 1 参 = 标签，其余 = 额外 CLI 参数。
 run() {
   local label=$1; shift
-  local envp=(XINFER_LOG_LEVEL=debug XINFER_DIAG_MTP=1)
+  # oneshot allreduce（e7fa54b）在 TP2 加载期就 CUDA_ERROR_ILLEGAL_ADDRESS，本件先绕开。
+  local envp=(XINFER_LOG_LEVEL=debug XINFER_DIAG_MTP=1 HF_HUB_OFFLINE=1 XINFER_ONESHOT_DISABLE=1)
   [[ -n "$OFFLOAD" ]] && envp+=("XINFER_MOE_OFFLOAD=$OFFLOAD")
   env "${envp[@]}" "$BIN" --m "$MODEL" --dtype "$DTYPE" --d "$DEVS" --max-model-len "$MML" ${BASE:-} \
       --prompts "$PROMPT" --max-tokens "$TOKENS" --temperature 0 --ignore-eos \
@@ -52,9 +53,9 @@ run() {
   # 分段：只在 MTP 开时存在。
   if grep -q "MTP step1" "$OUT/$label.log"; then
     sed -e 's/\x1b\[[0-9;]*m//g' "$OUT/$label.log" | awk -v tag="$label" '
-        /MTP step1/  {s+=$(NF-1)+0; ns++}
-        /MTP draft/  {d+=$(NF-1)+0; nd++}
-        /MTP verify/{v+=$(NF-1)+0; nv++}
+        /MTP step1/  {c1++; if (c1%2==1) {s+=$(NF-1)+0; ns++}}
+        /MTP draft/  {c2++; if (c2%2==1) {d+=$(NF-1)+0; nd++}}
+        /MTP verify/{c3++; if (c3%2==1) {v+=$(NF-1)+0; nv++}}
         END{printf "%s cycles=%d step1=%.2fms draft=%.2fms verify=%.2fms\n",
             tag, nv, s/ns, d/nd, v/nv}' >> "$OUT/segments.tsv"
   fi
