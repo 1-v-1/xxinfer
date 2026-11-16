@@ -427,14 +427,66 @@ pub struct TensorParallelRowLinear {
 #[allow(dead_code)]
 pub struct AllReduce {
     comm: Rc<Comm>,
+    slot: std::sync::Arc<std::sync::OnceLock<usize>>,
+    seq: std::sync::Arc<std::sync::atomic::AtomicU32>,
 }
 
 unsafe impl Sync for AllReduce {}
 unsafe impl Send for AllReduce {}
 
+static ONESHOT: std::sync::OnceLock<Option<std::sync::Arc<attention_rs::oneshot::OneShotArena>>> =
+    std::sync::OnceLock::new();
+
+/// Lazily build the world-2 one-shot arena: allocate our staging arena,
+/// hand the peer our IPC handle (disjoint-range u8 allreduce == gather),
+/// then map theirs.
+#[cfg(feature = "nccl")]
+fn oneshot_arena(comm: &Comm, dev: &candle_core::CudaDevice)
+    -> Option<std::sync::Arc<attention_rs::oneshot::OneShotArena>> {
+    ONESHOT
+        .get_or_init(|| {
+            use candle_core::backend::BackendStorage;
+            use candle_core::cuda_backend::WrapErr;
+            if comm.world_size() != 2
+                || std::env::var("XINFER_ONESHOT_DISABLE").is_ok()
+            {
+                return None;
+            }
+            let cuda = dev.clone();
+            let own = attention_rs::oneshot::alloc_handle(&candle_core::Device::Cuda(dev.clone())).ok()?;
+            let rank = comm.rank() as usize;
+            let mut v = vec![0u8; 128];
+            v[rank * 64..(rank + 1) * 64].copy_from_slice(&own);
+            let t = candle_core::Tensor::from_vec(v, (128,), &candle_core::Device::Cuda(dev.clone())).ok()?;
+            let (ts, _) = t.storage_and_layout();
+            let src = match &*ts {
+                candle_core::Storage::Cuda(c) => {
+                    c.as_cuda_slice::<u8>().ok()?.clone()
+                }
+                _ => return None,
+            };
+            let mut out = unsafe { cuda.alloc::<u8>(128) }.w().ok()?;
+            comm.all_reduce(&src, &mut out,
+                &candle_core::cuda_backend::cudarc::nccl::safe::ReduceOp::Sum)
+                .ok()?;
+            let base = (rank ^ 1) * 64;
+            let done = candle_core::Tensor::from_storage(
+                candle_core::Storage::Cuda(candle_core::CudaStorage::wrap_cuda_slice(out, cuda.clone())), (128,)).ok()?;
+            let hb = done.to_vec1::<u8>().ok()?;
+            let peer: [u8; 64] = hb[base..base + 64].try_into().ok()?;
+            attention_rs::oneshot::open(&candle_core::Device::Cuda(dev.clone()), &peer).ok()
+                .map(std::sync::Arc::new)
+        })
+        .clone()
+}
+
 impl AllReduce {
     pub fn new(comm: Rc<Comm>) -> Self {
-        Self { comm: comm.clone() }
+        Self {
+            comm: comm.clone(),
+            slot: std::sync::Arc::new(std::sync::OnceLock::new()),
+            seq: std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0)),
+        }
     }
     pub fn world_size(&self) -> usize {
         self.comm.world_size()
@@ -490,6 +542,21 @@ impl CustomOp1 for AllReduce {
                 eprintln!(
                     "[diag][nccl] all_reduce #{n} capturing={status:?} elem_count={elem_count}"
                 );
+            }
+        }
+
+        // 1Cat one-shot allreduce: small contiguous f16 decode payloads
+        // fold locally instead of paying the NCCL ring latency tax.
+        if s.dtype() == DType::F16 && l.is_contiguous() {
+            if let Some(a) = oneshot_arena(&self.comm, s.device()) {
+                let stride = (elem_count * 2 + 15) & !15;
+                if 2 * elem_count <= stride && 2 * elem_count <= 1 << 20 {
+                    let off = *self.slot.get_or_init(|| a.reserve(stride));
+                    if let Ok(out) = a.fold(
+                        s, l, off, stride, self.comm.rank() as usize) {
+                        return Ok((out, l.shape().clone()));
+                    }
+                }
             }
         }
 
@@ -598,7 +665,7 @@ impl TensorParallelRowLinear {
     pub fn new(linear: Linear, comm: Rc<Comm>, dtype: DType) -> Self {
         #[cfg(feature = "nccl")]
         let all_reduce = if comm.world_size() > 1 {
-            Some(AllReduce { comm })
+            Some(AllReduce::new(comm))
         } else {
             None
         };
@@ -620,7 +687,7 @@ impl TensorParallelRowLinear {
     ) -> Self {
         #[cfg(feature = "nccl")]
         let all_reduce = if comm.world_size() > 1 {
-            Some(AllReduce { comm })
+            Some(AllReduce::new(comm))
         } else {
             None
         };

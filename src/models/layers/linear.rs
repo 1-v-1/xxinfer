@@ -1518,10 +1518,9 @@ fn load_ln_fp8_with_hints(
 
     // sm70 channelwise: store the packed QPN8 twin in place of the raw weight,
     // so decode/verify GEMMs touch the weight bytes exactly once per call.
+    // The single-column local scale is the channel-wise signature; a sharded
+    // block layout leaves multiple local columns and must not pack.
     let (weight, weight_scale) = if dtype == DType::F16
-        && block_size.len() == 2
-        && block_size[0] == 1
-        && block_size[1] % in_dim == 0
         && weight_scale.dims2().map(|(_, c)| c == 1).unwrap_or(false)
         && sm_version < 80
         && weight_scale.dtype() == DType::F32
