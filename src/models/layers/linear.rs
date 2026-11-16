@@ -739,7 +739,7 @@ pub fn linear_x(
                         }
                     }
 
-                    match load_ln_fp8_with_hints(in_dim, out_dim, vb.clone(), shards, cfg, true) {
+                    match load_ln_fp8_with_hints(in_dim, out_dim, vb.clone(), shards, cfg, true, dtype) {
                         Ok(ln) => return Ok(LinearX::LnFp8(ln)),
                         Err(err) => return Err(err),
                     }
@@ -767,7 +767,7 @@ pub fn linear_x(
                         return Ok(LinearX::Linear(ln));
                     }
                     if !is_mlx && !has_nvfp4_specific_tensors(&vb, false) && has_fp8_tensors(&vb) {
-                        match load_ln_fp8_with_hints(in_dim, out_dim, vb.clone(), shards, cfg, true)
+                        match load_ln_fp8_with_hints(in_dim, out_dim, vb.clone(), shards, cfg, true, dtype)
                         {
                             Ok(ln) => return Ok(LinearX::LnFp8(ln)),
                             Err(_) => {
@@ -884,7 +884,7 @@ pub fn linear_no_bias_x(
                         }
                     }
 
-                    match load_ln_fp8_with_hints(in_dim, out_dim, vb.clone(), shards, cfg, false) {
+                    match load_ln_fp8_with_hints(in_dim, out_dim, vb.clone(), shards, cfg, false, dtype) {
                         Ok(ln) => return Ok(LinearX::LnFp8(ln)),
                         Err(err) => return Err(err),
                     }
@@ -919,6 +919,7 @@ pub fn linear_no_bias_x(
                             shards,
                             cfg,
                             false,
+                            dtype,
                         ) {
                             Ok(ln) => return Ok(LinearX::LnFp8(ln)),
                             Err(_) => {
@@ -1241,6 +1242,7 @@ fn load_ln_fp8_with_hints(
     shard: Shard,
     quant_cfg: &QuantConfig,
     load_bias: bool,
+    dtype: DType,
 ) -> Result<LnFp8> {
     // Some FP8 exporters (notably Qwen3.6 NVFP4/FP8 checkpoints) store a
     // per-tensor `weight_scale` as a scalar rather than a 2-D block-scale
@@ -1512,6 +1514,22 @@ fn load_ln_fp8_with_hints(
             .transpose()?
     } else {
         None
+    };
+
+    // sm70 channelwise: store the packed QPN8 twin in place of the raw weight,
+    // so decode/verify GEMMs touch the weight bytes exactly once per call.
+    let (weight, weight_scale) = if dtype == DType::F16
+        && block_size.len() == 2
+        && block_size[0] == 1
+        && block_size[1] % in_dim == 0
+        && weight_scale.dims2().map(|(_, c)| c == 1).unwrap_or(false)
+        && sm_version < 80
+        && weight_scale.dtype() == DType::F32
+        && std::env::var("XINFER_QPN8_DISABLE").is_err()
+    {
+        attention_rs::fp8_linear::fp8_qpn8_repack(&weight, &weight_scale)?
+    } else {
+        (weight, weight_scale)
     };
 
     Ok(LnFp8 {
