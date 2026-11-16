@@ -187,3 +187,17 @@
 ⇒ MTP 要赢，每步得净接受 ≥ 60.9/22.9 = **2.66** 个 token（上限 4）。实测 32.4 tok/s 反推净接受 ≈ 2.0 → **输**。
 
 而 `graph=true` 计数为 **0**：verify 全程 eager。§12 的判断到这里是**带数的**：verify 走 `is_prefill=true` 的 prefill 内核、且没被图覆盖，一步付掉 32.27 ms，比主模型整步还贵。
+
+## 15. 杠杆 1（verify 走图）在当前配置下不可用
+
+把探针默认从 `--disable-cuda-graph` 翻成开图（`OK=1`）重跑，**8 格全 0.0**，报的是：
+
+```
+KVCache allocation failed: Insufficient GPU memory for KVCache allocation.
+```
+
+注意这条和 §14 那条**不是同一条**：之前是"一个 prefill chunk 不够"，现在是"KVCache 池本身开不出来"。也就是说开图后图池要的额外预算把 KV 池挤没了，`MFRAC=0.35 / mml=1024` 这组参数下没有既开图又装得下的组合。
+
+⇒ `graph=false` 不是漏配，是当前显存预算下的必然。**杠杆 1 在这台机器上不是"纯赚"**，它要先解决图池预算。
+
+所以 −25.6% 的修法只剩杠杆 2：verify 的内核路径（`is_prefill=true` 的 prefill 内核 → `decode_plan_info`）。
