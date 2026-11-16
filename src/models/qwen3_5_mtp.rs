@@ -223,8 +223,11 @@ impl Qwen3_5MtpHead {
         // The mtp weights in the checkpoint are unquantised F16 and use the plain
         // `mtp.*` names (`mtp.pre_fc_norm_hidden`), not the qvar `nextn.*` scheme, so the
         // naming scheme must follow what is actually present, not the backbone format.
-        let is_qvar_builder = vb.is_qvar_builder()
-            && !has_any_key(vb, &["mtp.pre_fc_norm_hidden.weight"]);
+        // The mtp weights are unquantised F16 and use the plain `mtp.*` names. The
+// check is on the *mtp* builder with the *relative* key, which is how the
+// head actually resolves them (see `vb.pp("mtp").pp("pre_fc_norm_hidden")`).
+let is_qvar_builder = vb.is_qvar_builder()
+            && !vb.pp("mtp").has_key("pre_fc_norm_hidden.weight");
         let prefix = "mtp.";
         let mtp_block_prefix = config.num_hidden_layers.to_string();
         let mtp_vb = if is_qvar_builder {
