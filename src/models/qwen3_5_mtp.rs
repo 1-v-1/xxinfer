@@ -229,6 +229,14 @@ impl Qwen3_5MtpHead {
 let is_qvar_builder = vb.is_qvar_builder()
             && !vb.pp("mtp").has_key("pre_fc_norm_hidden.weight");
         let prefix = "mtp.";
+        if crate::utils::env::diag_mtp() {
+            crate::log_debug!(
+                "MTP weights: is_qvar={} mtp.pre_fc_norm_embedding={} mtp.nextn.enorm={}",
+                vb.is_qvar_builder(),
+                vb.pp("mtp").has_key("pre_fc_norm_embedding.weight"),
+                vb.pp("mtp").has_key("nextn.enorm.weight"),
+            );
+        }
         let mtp_block_prefix = config.num_hidden_layers.to_string();
         let mtp_vb = if is_qvar_builder {
             vb.pp(&mtp_block_prefix)
