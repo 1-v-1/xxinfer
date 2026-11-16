@@ -1065,7 +1065,11 @@ impl KVCacheAllocator {
             if graph_capacity > mamba_active_limit {
                 continue;
             }
-            if self.runtime_reserve_bytes(requested, max_model_len) <= remaining {
+            // `remaining` is what is left after the caches, and the caches were sized
+            // out of (free − workspace reserve), so the reserve is already counted
+            // once.  Requiring it again on top of `remaining` double-counts it and
+            // made the loop fall through to `0` on a box with plenty.
+            if self.runtime_reserve_bytes(requested, max_model_len) <= remaining + fixed_runtime {
                 return requested;
             }
         }
