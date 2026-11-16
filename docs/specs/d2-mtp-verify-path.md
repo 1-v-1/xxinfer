@@ -470,3 +470,35 @@ let local = ids.broadcast_sub(&off)?.broadcast_mul(
 ```
 
 `Qwen3_5` 传 `embed_tokens.row_offset()`，MoE 传 `0`。这是加一个入参，不是改 `Model` 的契约。
+
+## 29. 卡住的东西有名字了，而且是一行
+
+round 23 把统一入口推到只剩一个错：
+
+```
+error: lifetime may not live long enough
+  --> src/models/qwen3_5.rs:549:9
+```
+
+原因：跨分片求和要的聚合器是**借来的** —— `gather_part() -> Option<&AllGather>`，闭包要 `'static` 存不下借用。
+
+而它其实**只差一个 derive**：
+
+| 结构体 | 行 | 派生 |
+|---|---|---|
+| `AllReduce` | `distributed.rs:426` | `#[derive(Clone)]` ✅ |
+| `AllGather` | `distributed.rs:1709-1710` | **只有 `#[allow(dead_code)]`，无 Clone** ❌ |
+
+它的字段是 `Rc<Comm>` / `Arc<OnceLock<..>>` 这一类，全都可克隆 —— 加一行 `#[derive(Clone)]` 后 `self.all_gather.clone()` 就是 owned `'static`，round 23 那套统一入口整套成立。
+
+## 整条链（全部实测）
+
+```
+AllGather 不可 Clone → 聚合器只能借 → 统一入口进不了 'static 闭包   ← §29
+   ↓ 草稿查表没做跨分片求和
+掩成 0 的行没被补回 → norm_embed absmean=0.000                     ← §25/§21
+   ↓ argmax(全相等)=0
+draft=[0,0,0] → accepted=0                                          ← §19
+   ↓
+ctx=768  30.3 vs 43.9（目标 ≥43.7）                                  ← §14
+```
