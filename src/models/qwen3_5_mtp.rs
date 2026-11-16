@@ -507,6 +507,15 @@ impl Qwen3_5MtpHead {
         positions_base: usize,
     ) -> Result<(Vec<u32>, Tensor)> {
         let mut gpu_draft_tokens: Vec<Tensor> = Vec::with_capacity(num_tokens);
+        if crate::utils::env::diag_mtp() {
+            let stats = initial_hidden.flatten_all().and_then(|t| t.to_dtype(DType::F32)).and_then(|t| t.to_vec1::<f32>()).map(|v| {
+                let nz = v.iter().filter(|x| x.abs() > 1e-9).count();
+                let nan = v.iter().filter(|x| x.is_nan()).count();
+                let sum: f32 = v.iter().map(|x| x.abs()).sum();
+                format!("n={} nonzero={} nan={} absmean={:.3e}", v.len(), nz, nan, sum / v.len().max(1) as f32)
+            }).unwrap_or_else(|e| format!("<err {e}>"));
+            crate::log_debug!("MTP draft in: hidden {stats}");
+        }
         let mut current_hidden = if initial_hidden.dims().len() == 1 {
             initial_hidden.unsqueeze(0)?
         } else {

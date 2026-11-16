@@ -287,3 +287,24 @@ MTP accept: proposed=3 accepted=0 first_mismatch=Some(0) draft=[0, 0, 0] target=
 `argmax` 对**全相等**（全 0）的 logits 返回下标 **0** —— 与 §19 的 `draft=[0,0,0]` 完全一致。所以最可能是：`has_mtp_weights` 判假 → 头走了未初始化/零权重分支，或 `mtp_enabled=false` 让权重根本没被接上。
 
 下一轮的唯一探针：在 `draft_tokens_gpu` 入口打 `initial_hidden` 的 min/max/mean/nan 与 `has_mtp_weights` 的返回值。若 hidden 非 0 而 logits 全 0，就是权重分支；若 hidden 全 0，问题在 step1 的返回。
+
+## 21. 分支定了：hidden 是好的，问题在权重分支
+
+`draft_tokens_gpu` 入口探针实测：
+
+```
+MTP draft in: hidden n=5120 nonzero=5119 nan=0 absmean=1.042e0
+```
+
+| 量 | 值 | 判 |
+|---|---|---|
+| `n` | `5120` | = `hidden_size`，形状对 |
+| `nonzero` | `5119/5120` | **输入不是 0** |
+| `nan` | `0` | 不是 NaN |
+| `absmean` | `1.042` | 量级正常 |
+
+⇒ §20 的两个候选里，**"hidden 全 0"排除**。剩下唯一一条：**`forward_step` 的权重分支没接上**（`mtp_enabled=false` 下 `mtp.*` 那 15 个张量没被真正绑进头）。
+
+`argmax(全相等 logits) = 0` → `draft=[0,0,0]` → `accepted=0` → 每步只换回 anchor+bonus → 一步 60.9 ms 换 1.97 token → **−25.6%**。
+
+下一轮：在 `forward_step` 里打 `hidden_out` 的同一组统计。若 hidden_out 全相等，就坐实权重没绑上。
