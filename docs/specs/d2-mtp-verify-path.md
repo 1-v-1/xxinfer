@@ -171,3 +171,19 @@
 - 第 501 行：`长 q=1 标量 paged decode 合成算子路径是 B-accept`，且 `mixed Triton-prefill + Flash-decode 不再是已验收终点`。
 
 也就是说：verify 现在吃 prefill，等于每一步都付一次"Volta 上没有 cp.async 的 prefill"的 MIO 代价，而它随上下文涨 —— 与 §12 表里"只有 mtp=1 塌"完全对上。
+
+## 14. 三段计时实测（ctx=768, c=1, K=3, 2026-11-17）
+
+探针默认没开 `XINFER_LOG_LEVEL=debug`，所以 §12 之前一直读不到这三行 —— 已补进 `env_for`。
+
+| 段 | 每步耗时 | 说明 |
+|---|---|---|
+| step1（主模型出 logits+hidden） | **23.39 ms** | 等价于一次普通解码步 |
+| draft（MTP 头出 3 tok） | **5.28 ms** | |
+| verify（`m=4 graph=false`） | **32.27 ms** | **比一整次普通解码步还贵** |
+
+一步合计 ≈ **60.9 ms**。对照：非 MTP 一个 token = 1/43.7 tok/s = **22.9 ms**。
+
+⇒ MTP 要赢，每步得净接受 ≥ 60.9/22.9 = **2.66** 个 token（上限 4）。实测 32.4 tok/s 反推净接受 ≈ 2.0 → **输**。
+
+而 `graph=true` 计数为 **0**：verify 全程 eager。§12 的判断到这里是**带数的**：verify 走 `is_prefill=true` 的 prefill 内核、且没被图覆盖，一步付掉 32.27 ms，比主模型整步还贵。

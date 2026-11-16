@@ -26,15 +26,15 @@ BIN = os.environ.get("BIN", "/workspace/xxinfer/target/release/xinfer")
 MODEL = os.environ.get("MODEL", "unsloth/Qwen3.8-27B-NVFP4")
 K = int(os.environ.get("K", "3"))
 ROUNDS = int(os.environ.get("ROUNDS", "1"))
-CONC = int(os.environ.get("CONC", "2"))
-SMALL_CTX = int(os.environ.get("SMALL_CTX", "24"))
+CONC = int(os.environ.get("CONC", "1"))
+SMALL_CTX = int(os.environ.get("SMALL_CTX", "768"))
 LARGE_CTX = int(os.environ.get("MTP_LARGE_CTX", "768"))
 MAXT = int(os.environ.get("MAXT", "256"))
 MML = os.environ.get("MML", "1024")
 DTYPE = os.environ.get("DTYPE", "f16")
 DEVS = os.environ.get("DEVS", "0,1")
 OK = os.environ.get("OK", "0")            # 图：真模型上 MTP+开图在捕获期 OOM，默认关
-SEQS = int(os.environ.get("SEQS", "2"))   # 调度器并发上限，必须 ≥ CONC，否则请求排队
+SEQS = int(os.environ.get("SEQS", "1"))   # 调度器并发上限，必须 ≥ CONC，否则请求排队
 MFRAC = os.environ.get("MFRAC", "0.35")   # 混合状态（GDN conv/ssm）预算占比，并发时这块先吃地方
 OUT = os.path.join(os.environ.get("XINFER_PROBE_DIR", "/workspace/probe-out"), "mtp-api-perf")
 
@@ -42,7 +42,7 @@ OUT = os.path.join(os.environ.get("XINFER_PROBE_DIR", "/workspace/probe-out"), "
 def env_for(mtp_on):
     e = dict(os.environ)
     e.update(HF_HUB_OFFLINE="1", XINFER_ONESHOT_DISABLE="1", XINFER_MTP_RESERVE_MB="128",
-             XINFER_DIAG_LOGITS="1", XINFER_DIAG_MTP="1")
+             XINFER_DIAG_LOGITS="1", XINFER_DIAG_MTP="1", XINFER_LOG_LEVEL="debug")
     if OK == "0":
         e["XINFER_DISABLE_CUDA_GRAPH"] = "1"
     return e
