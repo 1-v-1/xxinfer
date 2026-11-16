@@ -1,8 +1,8 @@
-# 1Cat-vLLM SM70/V100 NVFP4 移植报告（xxinfer）
+# 规格 nvfp4-hmma884-port —— 已采纳（冻结）
 
-本文记录 1Cat-vLLM 的 V100（SM70/Volta）NVFP4 优化移植到 xxinfer 的完整过程、
-最终实现、验证方法与实测性能。**已否决的方案见同目录
-`sm70_1cat_rejected_paths.md`（97 项）。**
+> 状态：`已采纳`。本件是 CONVENTIONS §1.1 五节结构的样板，已判完生死即冻结，后续工作另开一份。
+> 本文记录 1Cat-vLLM 的 V100（SM70/Volta）NVFP4 优化移植到 xxinfer 的完整过程、最终实现、验证方法与实测性能。
+> 已否决的方案见 [../design/sm70_1cat_rejected_paths.md](<../design/sm70_1cat_rejected_paths.md>)（97 项）。
 
 ---
 

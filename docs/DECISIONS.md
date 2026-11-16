@@ -70,3 +70,8 @@
 ## D15 ✅ 图内状态与 collective 的形态契约
 - 决定：FULL graph 捕获**整个 forward**（全部层 + attention），不是只捕 attention 子图。GDN 循环状态存在 KV cache 的两个 tensor（`conv_state_cache` / `ssm_state_cache`，恒 F32），按 `state_indices` 选 slot **原地推进**；捕获期产出的每个中间 tensor 地址在 replay 期必须有效，且不得被分配给图外新 tensor。
 - 影响：vocab all-gather 留在图外；1Cat 删的是 NCCL 的 event bridge（因 conditional node body 不允许 event/host 节点），all-gather kernel 本身保留在图里。
+
+## D16 ✅ 一项工作一份规格，验收条 = case id = 测试标题，双向对账
+- 背景：此前流程第 1 步只写"对应主题文档"，没有固定形状；`@repro` 标记在 `tests/` 与 `src/` 实际 **0 处使用**，验收条与测试之间根本无从对账。
+- 决定：一项工作一份 `docs/specs/<id>-<subject>.md`，五节固定（CONVENTIONS §1.1）；验收条编号成 case id，测试标题写 `@case <spec-id>#<n>`，规格有而测试无、或测试有而规格无，都算红。判完生死即冻结。
+- 影响：`docs/design/` 只留上游逆向产物与已否决清单；样板 = [specs/nvfp4-hmma884-port.md](<./specs/nvfp4-hmma884-port.md>)。

@@ -13,10 +13,22 @@
 | 架构/契约/流程决策 | `docs/DECISIONS.md` |
 | 被证伪的方案 | `docs/design/sm70_1cat_rejected_paths.md` |
 | 硬件/内核实测结论、开关与坑 | `docs/SM70_VOLTA_FINDINGS.md` |
-| 内核移植契约与 fragment 布局 | `docs/design/sm70_nvfp4_hmma884_port.md` |
+| 一项工作的规格（含 fragment 布局等契约） | `docs/specs/<id>-<subject>.md` |
+| 上游逆向产物（1Cat 行为规格） | `docs/design/` |
 | 跨仓流程与规范 | `docs/` 对应主题文件 |
 
 - 结论必须带证据：性能带数值表，精度带误差数值 + 探针文件名，行号指向**当前**文件。
+
+### 1.1 规格模板（`docs/specs/<id>-<subject>.md`）
+一项工作一份，开工先写，随做随改；采纳或否决后**冻结**，不再长（后续工作另开一份）。五节固定：
+
+1. **现象与已知事实** —— 每条带 `文件:行号`
+2. **待验证假设** —— 按 预期收益 × 验证成本 排序，先做最便宜的
+3. **验收条** —— 每条一个 case id = `<spec-id>#<n>`
+4. **覆盖区间与回退路径** —— 生效区间 + 失效区间走哪条（D8）
+5. **结论** —— A/B 数值表 + wins + 测量条件（D12）
+
+**双向对账**：验收条 = case id = 测试标题。测试标题写 `@case <spec-id>#<n>`；规格有而测试无、或测试有而规格无，都算红——缺一条即红。缺陷回归同网不同表，标 `@repro <缺陷号>`。
 
 ## 2. 分支与提交
 - 提交前 `git status` 必须显示 `On branch perf/sm70-volta`，不是 `HEAD detached`（D7）。

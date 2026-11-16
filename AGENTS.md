@@ -23,5 +23,5 @@ cargo run --release -- --model <path> ...
 ```
 
 ## 文档分工
-`CONVENTIONS.md` 写代码时的规则 · `WORKFLOW.md` 推进流程 · `ARCHITECTURE.md` 代码在哪 · `TESTING.md` 怎么算验证过 · `DECISIONS.md` 已拍板决策 · `GLOSSARY.md` 术语 · `design/` 内核契约与已否决清单。
+`CONVENTIONS.md` 写代码时的规则 · `WORKFLOW.md` 推进流程 · `ARCHITECTURE.md` 代码在哪 · `TESTING.md` 怎么算验证过 · `DECISIONS.md` 已拍板决策 · `GLOSSARY.md` 术语 · `specs/` 一项工作一份规格（判完生死即冻结）· `design/` 上游逆向产物与已否决清单。
 **聊天记录不是真相源**：结论、否决、踩坑都要落到文件。
