@@ -2673,7 +2673,7 @@ impl ModelRunner {
             // The sampler kernels write `-1` into the output for a row they did
             // not recognise as valid; printed as u32 that is 4294967295.  Treat it
             // as a hard failure instead of letting it out as a token.
-            if let Some(&bad) = tokens.iter().find(|&&t| t == usize::MAX) {
+            if let Some(&bad) = tokens.iter().find(|&&t| t == u32::MAX) {
                 crate::log_error!(
                     "[sample][ordinal {ordinal}] sentinel {bad} from a row that was not a valid query row"
                 );
