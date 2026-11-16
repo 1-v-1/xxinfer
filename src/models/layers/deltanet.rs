@@ -803,14 +803,12 @@ impl GatedDeltaNet {
         }
 
         let is_quantized = config.quantization_config.is_some();
-        // Quantized (qvar) and f16-mode builds keep GDN state/weights in F32:
-        // the ported QPN kernels and the F32-sized state pool (see
-        // kvcache_allocator per_layer_recurrent_bytes) require it.
-        let gdn_dtype = if vb.is_qvar_builder() || config.is_f16_mode {
-            DType::F32
-        } else {
-            dtype
-        };
+        // 1Cat semantics: the GDN kernels are half-native and the model runs
+        // in F16; keeping GDN weights/activations in the model dtype avoids
+        // four full-size F32 casts per layer. The recurrent state pool is F32
+        // independently (kvcache_allocator hardcodes DType::F32), and the MTP
+        // verify path narrows its inputs to F16 at the kernel boundary.
+        let gdn_dtype = dtype;
 
         let num_v_heads = num_v_heads_global / world_size;
         let num_k_heads = num_k_heads_global / world_size;
@@ -996,9 +994,11 @@ impl GatedDeltaNet {
         let d_conv = key_dim * 2 + value_dim;
         let (conv_mtp_state, recurrent_mtp_state) = if config.mtp_enabled {
             // Must cover packed batch verify: batch_size * (num_speculative + 1).
-            // Default 16 matches historical single-seq verify_len<=16; runner sets
-            // mtp_max_verify_tokens from max_num_parallel_reqs before model build.
-            let max_verify_tokens = config.mtp_max_verify_tokens.max(16);
+            // The runner sets mtp_max_verify_tokens from max_num_parallel_reqs
+            // before model build; the floor only needs to cover a single small
+            // verify step (T = k+1 <= 4), not the historical 16-token window
+            // (16 slots cost 1.6 GB across 64 GDN layers).
+            let max_verify_tokens = config.mtp_max_verify_tokens.max(4);
             (
                 Some(Tensor::zeros(
                     (max_verify_tokens, d_conv, conv_kernel_size - 1),
@@ -1179,7 +1179,26 @@ impl GatedDeltaNet {
                 None
             };
 
-            if self.num_k_heads != self.num_v_heads {
+            if input_metadata.is_mtp_verify {
+                // 1Cat gdn_verify_sm70: one kernel runs the whole T-step
+                // recurrence, writes each step's state into the snapshot row
+                // and returns o; gating/L2-norm happen inside the kernel.
+                let snaps = recurrent_snapshots
+                    .as_ref()
+                    .expect("MTP verify needs recurrent snapshot buffer");
+                gdn::gdn_verify_mtp(
+                    &kv_conv,
+                    &a,
+                    &b,
+                    &self.a_log,
+                    &self.dt_bias,
+                    &*global_state,
+                    seq_slots,
+                    snaps,
+                    cu_seqlens,
+                    self.scale as f32,
+                )?
+            } else if self.num_k_heads != self.num_v_heads {
                 // FlashInfer's chunked GDN prefill is SM90-only by project
                 // limitation. Check the device up front so other archs do not
                 // pay for the exp(g) allocation before falling back.

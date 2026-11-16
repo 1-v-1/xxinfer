@@ -895,12 +895,22 @@ impl KVCacheAllocator {
         let mla_attention_bytes =
             mla_attention_bytes_per_token.saturating_mul(self.prefill_chunk_size.max(1) as u64);
 
+        // MTP draft/verify steps run an extra full-layer forward (attention +
+        // feed-forward scratch) on top of the pools; the generic per-token
+        // estimates above do not cover it, so hold back a fixed headroom.
+        let mtp_reserve_bytes = std::env::var("XINFER_MTP_RESERVE_MB")
+            .ok()
+            .and_then(|v| v.parse::<u64>().ok())
+            .unwrap_or(1024)
+            .saturating_mul(1024 * 1024);
+
         let total_bytes = flashinfer_bytes
             + cutlass_bytes
             + moe_pool_bytes
             + flash_splitk_bytes
             + transient_bytes
-            + mla_attention_bytes;
+            + mla_attention_bytes
+            + mtp_reserve_bytes;
         let total_bytes = total_bytes.max(MIN_ACTIVATION_RESERVE_BYTES);
 
         GpuMemoryBudget {
