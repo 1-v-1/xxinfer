@@ -108,4 +108,21 @@
 
 后果：模型加载后容器内 `GPU 0`（=物理 4）只剩 `0.66 GB available`，`GPU 1` 剩 `1.73 GB`。`max_model_len` 一旦给出，`kv_fraction` 就被强制成 0.8（`kvcache_allocator.rs:719-724`，且不允许与 `kv_fraction` 同时传），KV 池按预算铺满 → `max_parallel_reqs()`（`:1004-1045`）里 `remaining − fixed_runtime` 归零 → `max_parallel == 0` → 直接 bail（`:1201-1205`）。
 
-⇒ 之前"同样参数跑不通"不是参数问题。要复现 §5.3/§6 的两格，先释放它：`sudo nvidia-smi -i 4 -pm 0`。注意 `gpu-clean.sh` 的 `GPUS` 默认写的是容器编号 `0,1`，在宿主机上跑要写 `GPUS=4,5`。
+⇒ 之前"同样参数跑不通"不是参数问题，是这张卡比别人少 1.1 GB。
+
+## 8. 复位后实测（2026-11-17 02:5x，CLI 模式）
+
+**单发 + MTP（`1 1024 --num-speculative-tokens 3`）跑通了，而且采样前是好的：**
+
+```
+[diag] logits dims=[1, 248320] n=248320 min=-11.63 max=29.84 mean=0.357 nan=0 graph=false
+[diag][ordinal 0] sampled token ids: [760]    [diag][ordinal 1] sampled token ids: [760]
+```
+
+⇒ 全词表、`nan=0`、两个 rank 采到同一个 token。所以"开 MTP 单发也坏"在我这套参数下**不复现**；用户的 `-1` 只能来自"那一行根本没被喂成有效行"的另一条配置，不是 NaN。
+
+**并发 2 路在这台机上任何参数组合都起不来**：`max_parallel_reqs()` 归零 → `GPU memory is insufficient for one prefill chunk …`。而且日志里 `slot_bytes: 0`、`mamba_memory_bytes: 0` —— 这个模型实例**没被当成 hybrid mamba**。⇒ §6 第 1/2 条按"槽位轴 vs token 轴"的推断在这条路径上不成立，判据要改。
+
+## 9. 为什么"异常退出后显存不释放"会反复出现
+
+容器里 PID 1 = `tail`，不 `wait()`，所以任何孤儿 runner 永远停在 `Z xinfer <defunct>`（本轮收尾时 42 个），卡 0 停在 363 MiB、卡 1 停在 6 MiB。这不是参数问题，是容器没有 reaper。
