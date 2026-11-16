@@ -161,3 +161,13 @@
 1Cat 把两条索引分开：`state_indices_tensor_d` / `query_start_loc_d`（decode）对 `_p`（prefill），所以它的 verify 走 decode 那条；这里只有一条，且被标成 prefill。
 
 修法即 §6 第 2 条的具体形态：verify 不该 `is_prefill=true` 走 prefill 内核，该走 decode 批量内核（`decode_plan_info`）。
+## 13. 这条结论有既有事实背书（不是新猜的）
+
+`docs/design/sm70_1cat_rejected_paths.md` 里已经记着：
+
+- **F10**：长上下文 prefill 的瓶颈是 **MIO / dependency issue 压力**，不是带宽 → 加大访存并发没用。
+- **F11**：DRAM 吞吐 0.53%–0.56%，L2 hit 99.23% → prefill 不是 HBM 天花板。
+- **F12**：观测栈被限定为 **CUDA-event** / NVTX / `clock64()` phase stamps —— 这正是 `d2#2` 用 CUDA event 的依据。
+- 第 501 行：`长 q=1 标量 paged decode 合成算子路径是 B-accept`，且 `mixed Triton-prefill + Flash-decode 不再是已验收终点`。
+
+也就是说：verify 现在吃 prefill，等于每一步都付一次"Volta 上没有 cp.async 的 prefill"的 MIO 代价，而它随上下文涨 —— 与 §12 表里"只有 mtp=1 塌"完全对上。
