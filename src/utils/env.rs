@@ -196,3 +196,19 @@ pub fn diag_mtp() -> bool {
             .unwrap_or(false)
     })
 }
+
+/// Route the speculative verify step through the batched *decode* kernel instead
+/// of the prefill one.  The verify step currently pays more than a whole ordinary
+/// decode step (§14: 32.27 ms vs 22.9 ms) because it runs the prefill kernel, which
+/// on Volta has no `cp.async`.  Default off so the A/B is explicit (D10).
+pub const MTP_VERIFY_DECODE_KERNEL_ENV: &str = "XINFER_MTP_VERIFY_DECODE_KERNEL";
+
+static MTP_VERIFY_DECODE_KERNEL: OnceLock<bool> = OnceLock::new();
+
+pub fn mtp_verify_uses_decode_kernel() -> bool {
+    *MTP_VERIFY_DECODE_KERNEL.get_or_init(|| {
+        env::var(MTP_VERIFY_DECODE_KERNEL_ENV)
+            .map(|v| matches!(v.trim().to_lowercase().as_str(), "1" | "true" | "yes"))
+            .unwrap_or(false)
+    })
+}

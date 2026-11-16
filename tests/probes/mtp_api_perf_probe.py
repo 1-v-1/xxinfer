@@ -45,6 +45,12 @@ def env_for(mtp_on):
              XINFER_DIAG_LOGITS="1", XINFER_DIAG_MTP="1", XINFER_LOG_LEVEL="debug")
     if OK == "0":
         e["XINFER_DISABLE_CUDA_GRAPH"] = "1"
+    # A/B switch for §12/§14 lever 2.  Read from a file so the harness's
+    # command-lowercasing cannot silently swallow the uppercase variable name.
+    from pathlib import Path as _P
+    _sw = _P("/tmp/mvp")
+    if _sw.exists():
+        e["XINFER_MTP_VERIFY_DECODE_KERNEL"] = _sw.read_text().strip()
     return e
 
 

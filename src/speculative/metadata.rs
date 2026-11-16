@@ -100,7 +100,8 @@ impl ModelRunner {
             #[cfg(not(all(feature = "cuda", feature = "graph")))]
             let use_graph = false;
 
-            let prefill_plan_info = if use_graph {
+            let use_decode_kernel = crate::utils::env::mtp_verify_uses_decode_kernel();
+            let prefill_plan_info = if use_graph || use_decode_kernel {
                 None
             } else {
                 Some(attention_rs::flashinfer::prefill_plan(
@@ -120,6 +121,28 @@ impl ModelRunner {
                     false,
                 )?)
             };
+            // The reference keeps the two index axes apart (`*_d` for decode,
+            // `*_p` for prefill), so its verify runs the decode kernel.  Here the
+            // verify batch was `is_prefill = true` and paid the prefill kernel.
+            let decode_plan_info = if use_decode_kernel && !use_graph {
+                Some(attention_rs::flashinfer::decode_plan(
+                    self.device(),
+                    params.kv_dtype,
+                    params.out_dtype,
+                    &indptr_host,
+                    Some(&last_len_host),
+                    Some(&kv_len_arr_host),
+                    1,
+                    params.num_qo_heads,
+                    params.num_kv_heads,
+                    params.head_dim,
+                    params.page_size,
+                    use_graph,
+                    None,
+                )?)
+            } else {
+                None
+            };
 
             Some(attention_rs::FlashInferMetadata {
                 indptr: Tensor::from_vec(indptr_host.clone(), (2,), self.device())?,
@@ -132,7 +155,7 @@ impl ModelRunner {
                 batch_indices: Some(batch_indices),
                 positions: Some(append_positions),
                 use_cuda_graph: use_graph,
-                decode_plan_info: None,
+                decode_plan_info,
                 prefill_plan_info,
                 mla_decode_plan_info: None,
                 mla_prefill_plan_info: None,

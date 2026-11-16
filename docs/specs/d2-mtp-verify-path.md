@@ -201,3 +201,19 @@ KVCache allocation failed: Insufficient GPU memory for KVCache allocation.
 ⇒ `graph=false` 不是漏配，是当前显存预算下的必然。**杠杆 1 在这台机器上不是"纯赚"**，它要先解决图池预算。
 
 所以 −25.6% 的修法只剩杠杆 2：verify 的内核路径（`is_prefill=true` 的 prefill 内核 → `decode_plan_info`）。
+
+## 16. 杠杆 2（verify 换 decode 内核）—— 证伪
+
+`XINFER_MTP_VERIFY_DECODE_KERNEL=1`（经 `/tmp/mvp` 传给探针，避开命令行被小写化）：
+
+| 段 | 关（prefill 内核） | 开（decode 内核） |
+|---|---|---|
+| step1 | 23.39 ms | 27.90 ms |
+| verify `m=4` | **32.27 ms** | **88.11 ms** |
+| 解码段 tok/s | 32.4 | 32.4–32.8 |
+
+**verify 反而贵了 2.7 倍**（32.27 → 88.11）。批量 decode 内核在 `q=4` 上没有 prefill 内核快 —— 它是为 `q=1` 设计的（`rejected_paths:501`：`长 q=1 标量 paged decode 合成算子路径是 B-accept`，即被验收的是 **q=1**）。
+
+⇒ §12 那句"该走 decode 内核"**证伪**：不是内核选错，是 **`q=4` 这件事本身在 Volta 上没有快路径**。开关保留默认关，作为已证伪的 A/B 面。
+
+剩下唯一还没试的：净接受率。§14 的算术是"需净接受 ≥2.66/4 才赢，实测 ≈2.0"。
