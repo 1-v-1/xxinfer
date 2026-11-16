@@ -253,3 +253,24 @@ for i in 0..compare_len { if target_vec[i] == draft_tokens[i] { .. } }
 ⇒ §17 说的"两边的 i 不是同一个 token"这条**不成立**，别再顺着它找。
 
 剩下的唯一解释是草稿本身与主模型不符（MTP 头输出错），而那需要一个直接量：**第一次不匹配时把 draft[i] 与 target_vec[i] 一起打出来**。没有这个数，"接受率≈0"仍然只是从吞吐反推的，不是测出来的。
+
+## 19. 实测：草稿输出的是 **token 0**（不是"略有不符"）
+
+`XINFER_DIAG_MTP=1` 下第一次跑出来的实测行：
+
+```
+MTP accept: proposed=3 accepted=0 first_mismatch=Some(0) draft=[0, 0, 0] target=[198, 248046, …]
+```
+
+| 量 | 值 | 含义 |
+|---|---|---|
+| `draft` | **`[0, 0, 0]`** | 草稿头每一步吐的都是 **token id 0** |
+| `target` | `[198, 248046, …]` | 主模型的真实预测（`248046` 是 eos 之一）|
+| `first_mismatch` | `Some(0)` | 第 0 个就对不上 |
+| `accepted` | `0` | 一个都没接受 |
+
+§17 的 `accepted ≈ 0` 从**反推**变成**测出**，而且原因比"对不上"更硬：**`draft_tokens_gpu` 输出全 0**。
+
+所以这条链到此闭合：MTP 在这个移植上**从来没通过** —— 草稿头没产出有效 token，每步纯付 `draft 5.28 + verify 32.27 ms` 换 anchor+bonus。§12/§15/§16 三条内核路径的争论全都是次要的。
+
+下一步是查 `draft_tokens_gpu` 为什么返回 0（MTP 头权重没加载 / 输入 hidden 是 0 / argmax 取到了 pad 行），不是再调内核。

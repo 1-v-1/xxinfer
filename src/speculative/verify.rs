@@ -51,6 +51,21 @@ pub fn verify_draft_greedy(
             break;
         }
     }
+    // The acceptance rate so far was only *inferred* from throughput (§17).  This
+    // measures it: what the drafter proposed, what the target predicted at the
+    // same position, and where the prefix first disagreed.
+    if crate::utils::env::diag_mtp() {
+        let d4: Vec<u32> = draft_tokens.iter().take(4).copied().collect();
+        let t4: Vec<u32> = target_vec.iter().take(4).copied().collect();
+        crate::log_debug!(
+            "MTP accept: proposed={} accepted={} first_mismatch={:?} draft={:?} target={:?}",
+            num_proposed,
+            num_accepted,
+            if num_accepted < compare_len { Some(num_accepted) } else { None },
+            d4,
+            t4,
+        );
+    }
 
     let accepted_tokens = draft_tokens[..num_accepted].to_vec();
     let continuation_token = if num_accepted < num_positions {
