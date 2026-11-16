@@ -230,6 +230,9 @@ pub struct KVCacheAllocator {
     moe_num_experts_per_tok: usize,
     is_moe: bool,
     prefill_chunk_size: usize,
+    /// MTP draft/verify steps run an extra full-layer forward; the pool sizing
+    /// must hold back activation headroom for them.
+    mtp_enabled: bool,
     /// Whether FlashInfer GPU workspace is actually initialized at runtime.
     /// When false, do not reserve FlashInfer memory in the KV-cache budget.
     use_flashinfer_workspace: bool,
@@ -743,6 +746,7 @@ impl KVCacheAllocator {
             moe_num_experts_per_tok,
             is_moe,
             prefill_chunk_size: econfig.effective_prefill_chunk_size(),
+            mtp_enabled: econfig.num_speculative_tokens.unwrap_or(0) > 0,
             max_num_seqs: econfig.max_num_seqs,
             use_flashinfer_workspace: uses_flashinfer_workspace(econfig, config),
             cuda_graph_enabled: !econfig.disable_cuda_graph,
@@ -898,11 +902,15 @@ impl KVCacheAllocator {
         // MTP draft/verify steps run an extra full-layer forward (attention +
         // feed-forward scratch) on top of the pools; the generic per-token
         // estimates above do not cover it, so hold back a fixed headroom.
-        let mtp_reserve_bytes = std::env::var("XINFER_MTP_RESERVE_MB")
-            .ok()
-            .and_then(|v| v.parse::<u64>().ok())
-            .unwrap_or(1024)
-            .saturating_mul(1024 * 1024);
+        let mtp_reserve_bytes = if self.mtp_enabled {
+            std::env::var("XINFER_MTP_RESERVE_MB")
+                .ok()
+                .and_then(|v| v.parse::<u64>().ok())
+                .unwrap_or(1024)
+                .saturating_mul(1024 * 1024)
+        } else {
+            0
+        };
 
         let total_bytes = flashinfer_bytes
             + cutlass_bytes
