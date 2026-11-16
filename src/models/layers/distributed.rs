@@ -445,7 +445,6 @@ fn oneshot_arena(comm: &Comm, dev: &candle_core::CudaDevice)
     -> Option<std::sync::Arc<attention_rs::oneshot::OneShotArena>> {
     ONESHOT
         .get_or_init(|| {
-            use candle_core::backend::BackendStorage;
             use candle_core::cuda_backend::WrapErr;
             if comm.world_size() != 2
                 || std::env::var("XINFER_ONESHOT_DISABLE").is_ok()
@@ -2266,6 +2265,4 @@ pub fn gather_vocab_logits(
             }
             return Ok(logits);
     }
-
-    Ok(logits)
 }

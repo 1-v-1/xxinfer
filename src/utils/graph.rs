@@ -1783,7 +1783,7 @@ impl<M: CudaGraphModule> GraphCapturer<M> {
                         .and_then(|d| d.as_cuda_device().ok())
                     {
                         match attention_rs::workspace::diag_plan_device_matches(dev, true) {
-                            Ok((is_match, report)) => {
+                            Ok((_, report)) => {
                                 eprintln!("[diag][plan][replay] bs={batch} {report}");
                             }
                             Err(e) => eprintln!("[diag][plan][replay] error: {e}"),

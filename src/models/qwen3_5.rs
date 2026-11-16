@@ -14,7 +14,6 @@ use crate::utils::resolve_qwen3_hybrid_config;
 use attention_rs::mamba_cache::MambaCache;
 use attention_rs::InputMetadata;
 use candle_core::{DType, Device, Result, Tensor};
-use candle_nn::Module;
 use parking_lot::{RwLock, RwLockWriteGuard};
 use std::collections::HashMap;
 use std::rc::Rc;

@@ -20,7 +20,6 @@ use crate::utils::progress::ProgressLike;
 use crate::utils::FlashInferKvParams;
 use crate::utils::{CpuKvCache, GpuKvCache};
 use crate::{
-    log_debug,
     core::sequence::{DecodeSequence, Sequence, ToDecodeInput},
     models::deepseek3::DeepSeekForCausalLM,
     models::deepseek4::DeepSeekV4ForCausalLM,
@@ -52,13 +51,13 @@ use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 use std::sync::{Arc, Mutex, MutexGuard};
 
-/// Number of decode steps that have been executed for the current request.
-///
-/// The counter is reset by the prefill and advanced by every decode step.  It
-/// is only used by the `XINFER_GRAPH_MAX_STEPS` diagnostic, which lets the
-/// CUDA graph serve the first few decode steps and then falls back to the
-/// eager path.  That separates "the graph computes something else" from "the
-/// graph leaves the state in a shape the eager path cannot use".
+// Number of decode steps that have been executed for the current request.
+//
+// The counter is reset by the prefill and advanced by every decode step.  It
+// is only used by the `XINFER_GRAPH_MAX_STEPS` diagnostic, which lets the
+// CUDA graph serve the first few decode steps and then falls back to the
+// eager path.  That separates "the graph computes something else" from "the
+// graph leaves the state in a shape the eager path cannot use".
 thread_local! {
     static DECODE_STEP: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
 }
