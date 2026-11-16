@@ -371,3 +371,29 @@ MTP head step 0: hidden_out n=5120 nonzero=0 absmean=NaN; logits n=248320 nonzer
 `argmax(全 NaN)` 返回下标 **0** ⇒ `draft=[0,0,0]`（§19）⇒ `accepted=0` ⇒ 每步只换回 anchor+bonus ⇒ `ctx=768` 32.2 对 43.9。
 
 **修正 §21/§22 的措辞**：不是"权重没绑上所以输出 0"，是**头把一段健康的输入算成了 NaN**（输入侧 §21 已证健康：5119/5120 非零、absmean 1.042）。
+
+## 25. NaN 出在哪一段：`norm_embed`，不是整条链
+
+逐段探针实测（`XINFER_DIAG_MTP=1`）：
+
+```
+MTP head norm_hidden: n=5120 nan=0     absmean=5.671e-1   ← 健康
+MTP head norm_embed:  n=5120 nan=5120  absmean=NaN        ← 全 NaN
+```
+
+| 段 | 结果 |
+|---|---|
+| `pre_fc_norm_hidden(backbone_hidden)` | **健康**（absmean 0.567，无 NaN）|
+| `pre_fc_norm_embedding(token_embedding)` | **5120 个全 NaN** |
+
+⇒ NaN 不是从骨干 hidden 带进来的（§21 已证输入健康），是**第二路 embedding 查表**产生的。
+
+对应 `draft_tokens_gpu` 里这一行：
+
+```rust
+let token_embed = embed_weight.index_select(&current_token_t, 0)?;
+```
+
+`embed_weight` 在 nvfp4 模型上是**量化张量**，`index_select` 直接按行切片量化块 ≠ 反量化后取值 ⇒ 查出来是 NaN。
+
+`cat([norm_embed, norm_hidden])` 之后整段被污染，`fc` → `layer` → `norm` 全 NaN，`argmax(全 NaN)=0` ⇒ `draft=[0,0,0]`。

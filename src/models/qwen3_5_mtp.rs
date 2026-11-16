@@ -471,6 +471,23 @@ impl Qwen3_5MtpHead {
     /// `positions`: position IDs for this step
     /// `kv_cache`: MTP head's own KV cache (separate from backbone)
     /// `input_metadata`: attention metadata for this step
+    fn mtp_probe(tag: &str, t: &Tensor) {
+    if !crate::utils::env::diag_mtp() {
+        return;
+    }
+    let v = t.flatten_all().and_then(|x| x.to_dtype(DType::F32)).and_then(|x| x.to_vec1::<f32>());
+    match v {
+        Ok(v) => {
+            let nan = v.iter().filter(|x| x.is_nan()).count();
+            let sum: f32 = v.iter().map(|x| x.abs()).sum();
+            crate::log_debug!(
+                "MTP head {tag}: n={} nan={} absmean={:.3e}",
+                v.len(), nan, sum / v.len().max(1) as f32);
+        }
+        Err(e) => crate::log_debug!("MTP head {tag}: <err {e}>"),
+    }
+}
+
     pub fn forward_step(
         &self,
         backbone_hidden: &Tensor,
@@ -478,7 +495,9 @@ impl Qwen3_5MtpHead {
         positions: &Tensor,
     ) -> Result<Tensor> {
         let norm_hidden = self.pre_fc_norm_hidden.forward(backbone_hidden)?;
+        Self::mtp_probe("norm_hidden", &norm_hidden);
         let norm_embed = self.pre_fc_norm_embedding.forward(token_embedding)?;
+        Self::mtp_probe("norm_embed", &norm_embed);
 
         // Concat order: [embedding, hidden] — matches vLLM/HuggingFace weight layout
         // The FC weight's first half corresponds to embedding columns
@@ -486,11 +505,13 @@ impl Qwen3_5MtpHead {
         let fused = Tensor::cat(&[norm_embed, norm_hidden], D::Minus1)?;
         let fused = fused.to_dtype(self.dtype)?;
         let xs = self.fc.forward(&fused)?;
+        Self::mtp_probe("fc_out", &xs);
 
         // MTP head uses single-token attention without KV cache
         let xs = self
             .layer
             .forward_single_token(&xs, positions, &self.rotary_emb)?;
+        Self::mtp_probe("layer_out", &xs);
 
         self.norm.forward(&xs)
     }
