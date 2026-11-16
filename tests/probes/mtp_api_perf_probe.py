@@ -23,7 +23,7 @@ import urllib.request
 
 ANSI = re.compile(r"\x1b\[[0-9;]*[a-z]")
 BIN = os.environ.get("BIN", "/workspace/xxinfer/target/release/xinfer")
-MODEL = os.environ.get("MODEL", "tiny-random/Qwen3.5")
+MODEL = os.environ.get("MODEL", "unsloth/Qwen3.8-27B-NVFP4")
 K = int(os.environ.get("K", "3"))
 ROUNDS = int(os.environ.get("ROUNDS", "1"))
 CONC = int(os.environ.get("CONC", "2"))
