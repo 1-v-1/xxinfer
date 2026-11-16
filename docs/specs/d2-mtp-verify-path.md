@@ -217,3 +217,20 @@ KVCache allocation failed: Insufficient GPU memory for KVCache allocation.
 ⇒ §12 那句"该走 decode 内核"**证伪**：不是内核选错，是 **`q=4` 这件事本身在 Volta 上没有快路径**。开关保留默认关，作为已证伪的 A/B 面。
 
 剩下唯一还没试的：净接受率。§14 的算术是"需净接受 ≥2.66/4 才赢，实测 ≈2.0"。
+
+## 17. 净接受率：反推出来是 ≈0，问题不在内核
+
+`verify.rs:119-126` 的口径是 `avg_tokens/step = accepted/steps + 2`（anchor + bonus 各 1，draft 接受数另计）。
+
+用 §14 的两个实测数反推：一步 `60.9 ms`，吞吐 `32.4 tok/s` ⇒
+
+```
+tokens/step = 0.0609 × 32.4 = 1.97
+⇒ accepted/steps = 1.97 − 2 ≈ 0
+```
+
+**draft 出来的 3 个 token 基本一个都没被接受。** 那 MTP 就纯粹是开销：付了 draft(5.28) + verify(32.27) 的钱，只换回 anchor+bonus 两个 token，和不开 MTP 的 1 个 token 比必输。
+
+所以 −25.6% 的根因不是"verify 走哪个内核"（§16 已证伪两条），是**草稿和主模型对不上**。
+
+下一步该查的是 `verify.rs:46-57` 那条贪心前缀匹配与 draft 的 token 序，不是内核路径。
