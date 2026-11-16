@@ -142,3 +142,22 @@
 结论：MTP 的收益随上下文变长而翻转 —— 小上下文 +39%，768 token 时 −26%。`chunks` 都是 257（=MAXT+1），所以是满长度生成，不是提前停。
 
 两格的"关 MTP + 并发"仍然 `server not ready`，所以并发列只有 MTP 开的单边数，不能拿来比 Δ。
+
+## 12. −25.6% 贵在哪一段：不用插桩就能定死
+
+三段计时还没做，但已有数据已经够定死，因为对照组的形状是平的：
+
+| | ctx=24 | ctx=768 | 随上下文 |
+|---|---|---|---|
+| MTP 关（每步 1 个 query） | 43.0 | 43.7 | **平的** |
+| MTP 开（每步 K+1=4 个 query） | 59.9 | 32.4 | **塌** |
+
+⇒ 慢的不是"上下文"，是**verify 那一步走的内核**。
+
+`build_verify_metadata` 把 `is_prefill: true`，并填 `prefill_plan_info`（`metadata.rs:87-106`），所以 verify 吃的是 **prefill** 注意力内核。而加速报告自己写着：
+
+> `[slow] flashinfer_prefill — the FlashInfer prefill kernels require SM80+ (cp.async is not available on Volta)`
+
+1Cat 把两条索引分开：`state_indices_tensor_d` / `query_start_loc_d`（decode）对 `_p`（prefill），所以它的 verify 走 decode 那条；这里只有一条，且被标成 prefill。
+
+修法即 §6 第 2 条的具体形态：verify 不该 `is_prefill=true` 走 prefill 内核，该走 decode 批量内核（`decode_plan_info`）。
