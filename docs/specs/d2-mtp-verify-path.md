@@ -417,3 +417,21 @@ let embed_weight = match self.model() {
 2. 或在头内先 `dequantize` 再查表。
 
 两者都要动 `draft_tokens_gpu` 的入参类型，不是改一行能验完的 —— 留到有预算的一轮做。
+
+## 27. 差别不在"量化"，在 **vocab-parallel 的下标重映射**
+
+`VocabParallelEmbedding`（`layers/distributed.rs:1866+`）：
+
+```rust
+pub fn forward(&self, tokens: &Tensor) -> Result<Tensor> {   // :1936
+    …
+    let looked_up = self.weight.index_select(&local, 0)?;    // :1959
+```
+
+主干查表也是 `index_select`，但用的是 **`local`** —— 词表按 rank 切分后要先把全局 token id 映到本分片的局部下标。
+
+草稿这条路（`mtp.rs:236` → `draft_tokens_gpu`）拿的是 `embed_weight()` = `self.embed_tokens.weight()`，**没过重映射**，直接拿全局 id 去切本分片那半张表 ⇒ 读到别的分片的行 ⇒ NaN（§25）。
+
+TP2、`vocab_size 248320`、`shard_indices: Some((0, 1))` —— 条件完全成立。
+
+**修法**：`draft_tokens_gpu` 收 `&VocabParallelEmbedding` 并调它的 `forward(tokens)`，而不是收 `Tensor` 再自己 `index_select`。
