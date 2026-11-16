@@ -4,6 +4,10 @@
 主控文档：`docs/design/sm70_v100_migration_control.md`（49,698 行）
 本报告所有行号均指向工作区当前文件（最新版）。
 
+> **姊妹件**：[sm70_1cat_unported_optimizations.md](<./sm70_1cat_unported_optimizations.md>) —
+> **上游当前最优 prefill / decode 路径里还没搬进 xinfer 的优化清单**（含逐条易混对照表：本清单的"已否决"项 ↔ 那边的"未移植"项）。
+> 两件是同一轴的两端：本件说"哪些不能做"，姊妹件说"还有哪些没做"。
+
 ---
 
 ## 0. 阅读指引
