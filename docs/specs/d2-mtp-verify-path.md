@@ -96,3 +96,16 @@
 1. 把序列轴→token 轴的展开做成显式一步：产出 `seq_of_token`，让 `slot_mapping[t] = slots[seq_of_token[t]]`，并在两处入口断言 `slot_mapping.len() == input_ids.len()`、`mamba_slot_mapping.len() == seqs.len()`。
 2. `build_verify_metadata` 改用 `ensure_mamba_slots_for_sequences`（与 prefill 一致），别在 verify 里 `get_`。
 3. 采样侧加硬闸：核写 `valid` 标志或调用方检出哨兵就报错，NaN logits 必须显式失败，不许静默出 token（D9 的日志门控走 `XINFER_DIAG_*`）。
+
+## 7. 复现环境事实：物理卡 4 上挂着 1113 MiB 的主上下文
+
+`start-container.sh` 把宿主机物理卡 **4 和 5** 挂进容器（容器内重编号为 0/1）。2026-11-17 02:2x 实测：
+
+```
+4, GPU-f9db7e33…, 1113 MiB, Enabled   ← 无任何 compute-app 持有，是 persistence mode 留住的主上下文
+5, GPU-74d2d5c8…,    1 MiB, Enabled
+```
+
+后果：模型加载后容器内 `GPU 0`（=物理 4）只剩 `0.66 GB available`，`GPU 1` 剩 `1.73 GB`。`max_model_len` 一旦给出，`kv_fraction` 就被强制成 0.8（`kvcache_allocator.rs:719-724`，且不允许与 `kv_fraction` 同时传），KV 池按预算铺满 → `max_parallel_reqs()`（`:1004-1045`）里 `remaining − fixed_runtime` 归零 → `max_parallel == 0` → 直接 bail（`:1201-1205`）。
+
+⇒ 之前"同样参数跑不通"不是参数问题。要复现 §5.3/§6 的两格，先释放它：`sudo nvidia-smi -i 4 -pm 0`。注意 `gpu-clean.sh` 的 `GPUS` 默认写的是容器编号 `0,1`，在宿主机上跑要写 `GPUS=4,5`。
