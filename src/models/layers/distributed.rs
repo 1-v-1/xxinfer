@@ -1990,6 +1990,11 @@ impl VocabParallelEmbedding {
     /// `(row_offset, rows)` for this rank: the draft head must shift global
     /// token ids down to local rows exactly like `forward` does.
     /// The cross-shard gather this table was built with, if any.
+    pub fn gather_owned(&self) -> Option<AllGather> {
+        self.all_gather.clone()
+    }
+
+    #[allow(dead_code)]
     pub fn gather_part(&self) -> Option<&AllGather> {
         self.all_gather.as_ref()
     }
