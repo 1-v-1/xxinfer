@@ -308,3 +308,24 @@ MTP draft in: hidden n=5120 nonzero=5119 nan=0 absmean=1.042e0
 `argmax(全相等 logits) = 0` → `draft=[0,0,0]` → `accepted=0` → 每步只换回 anchor+bonus → 一步 60.9 ms 换 1.97 token → **−25.6%**。
 
 下一轮：在 `forward_step` 里打 `hidden_out` 的同一组统计。若 hidden_out 全相等，就坐实权重没绑上。
+
+## 22. 名字对不上：这份检查点走不到 `nextn.*` 那条分支
+
+检查点里 15 个 mtp 张量的**全名**：
+
+```
+mtp.fc.weight                      mtp.layers.0.input_layernorm.weight
+mtp.pre_fc_norm_hidden.weight      mtp.pre_fc_norm_embedding.weight
+mtp.norm.weight                    mtp.layers.0.{mlp.*,self_attn.*}.weight
+```
+
+而 `qwen3_5_mtp.rs:240-257` 按分支取两套名字：
+
+| 分支 | 取的键 | 这份检查点里有吗 |
+|---|---|---|
+| `!is_qvar_builder` | `mtp.pre_fc_norm_hidden` | **有** |
+| `is_qvar_builder` | `nextn.hnorm` → `mtp.nextn.hnorm.weight` | **没有** |
+
+模型是 nvfp4（`quant_method: "nvfp4"`），`is_qvar_builder()` 为真 ⇒ 代码去找 `mtp.nextn.hnorm.weight`，而检查点里只有 `mtp.pre_fc_norm_hidden.weight`。`:236-238` 那句注释"MTP 不继承骨干的 NVFP4 设置、`mtp_config.quant = None`"说明 mtp 权重是未量化 F16，但**取名的键仍跟着 qvar 分支走了**。
+
+⇒ 这就是 §21 说的"权重分支没接上"的具体形态：**键名分支选错，norm 权重取不到**。
