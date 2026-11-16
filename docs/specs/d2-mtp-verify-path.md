@@ -110,17 +110,20 @@
 
 ⇒ 之前"同样参数跑不通"不是参数问题，是这张卡比别人少 1.1 GB。
 
-## 8. 复位后实测（2026-11-17 02:5x，CLI 模式）
+## 8. 复位后实测（2026-11-17 02:5x，CLI 模式）—— 本节的"跑通了"是误判，见 §10
 
-**单发 + MTP（`1 1024 --num-speculative-tokens 3`）跑通了，而且采样前是好的：**
+**单发 + MTP（`1 1024 --num-speculative-tokens 3`）当时只 grep 了 `dims|sampled`：**
 
 ```
 [diag] logits dims=[1, 248320] n=248320 min=-11.63 max=29.84 mean=0.357 nan=0 graph=false
 [diag][ordinal 0] sampled token ids: [760]    [diag][ordinal 1] sampled token ids: [760]
 ```
 
-⇒ 全词表、`nan=0`、两个 rank 采到同一个 token。所以"开 MTP 单发也坏"在我这套参数下**不复现**；用户的 `-1` 只能来自"那一行根本没被喂成有效行"的另一条配置，不是 NaN。
+⇒ 这些行只证明 **prefill 那一行 logits 是好的**（第一个 token 是 prefill 出的）。同一份 `/tmp/tiny.log` 里还有 6 次 `k_dim=32 not supported` 和 `flashinfer decode head_dim=32 is not compiled for this device; supported: [128, 256]` —— decode 一上来就炸。当时把错误行过滤掉了，所以误以为"跑通了"。
 
+## 10. `tiny-random/Qwen3.5` 在这台 V100 上走不到 decode
+
+它的 `head_dim: 32`、`num_attention_heads: 8`、`num_key_value_heads: 4`。而这份构建里 flashinfer decode 只编了 `[128, 256]`，`gated_delta_rule_recurrence_varlen_gqa` 也不支持 `k_dim=32`。所以"用同架构小模型跑矩阵"这条路要先解决头维不被支持，否则连一步 decode 都迈不过去。
 **并发 2 路在这台机上任何参数组合都起不来**：`max_parallel_reqs()` 归零 → `GPU memory is insufficient for one prefill chunk …`。而且日志里 `slot_bytes: 0`、`mamba_memory_bytes: 0` —— 这个模型实例**没被当成 hybrid mamba**。⇒ §6 第 1/2 条按"槽位轴 vs token 轴"的推断在这条路径上不成立，判据要改。
 
 ## 9. 为什么"异常退出后显存不释放"会反复出现
