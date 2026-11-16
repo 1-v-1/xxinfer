@@ -353,3 +353,21 @@ let is_qvar_builder = vb.is_qvar_builder()
 
 **未证伪的还剩**：`forward_step` 里 `hidden_out` 是否全相等（§21 留的那一步没做）。
 **结构性障碍**：`mtp=0` 四格在这台两卡机上始终起不来（`max_parallel_reqs()==0` / KV 池开不出来），所以"单发/并发 × 大小上下文"的完整矩阵从来没有可比的两边。
+
+## 24. 根因测出来了：MTP 头输出的是 **NaN**
+
+`forward_step` 出口探针实测：
+
+```
+MTP head step 0: hidden_out n=5120 nonzero=0 absmean=NaN; logits n=248320 nonzero=0 absmean=NaN
+```
+
+| 量 | 值 | 读法 |
+|---|---|---|
+| `nonzero=0` | NaN 过不了 `abs() > 1e-9` | 不是"全 0" |
+| `absmean=NaN` | 求和遇 NaN 即 NaN | **整段是 NaN** |
+| `n=5120` / `248320` | 形状对 | 不是切片错 |
+
+`argmax(全 NaN)` 返回下标 **0** ⇒ `draft=[0,0,0]`（§19）⇒ `accepted=0` ⇒ 每步只换回 anchor+bonus ⇒ `ctx=768` 32.2 对 43.9。
+
+**修正 §21/§22 的措辞**：不是"权重没绑上所以输出 0"，是**头把一段健康的输入算成了 NaN**（输入侧 §21 已证健康：5119/5120 非零、absmean 1.042）。

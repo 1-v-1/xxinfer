@@ -536,6 +536,19 @@ impl Qwen3_5MtpHead {
             let hidden_out = self.forward_step(&current_hidden, &token_embed, &positions)?;
 
             let logits = lm_head_fn(&hidden_out.to_dtype(self.dtype)?)?;
+            if crate::utils::env::diag_mtp() {
+                let h = hidden_out.flatten_all().and_then(|t| t.to_dtype(DType::F32)).and_then(|t| t.to_vec1::<f32>()).map(|v| {
+                    let nz = v.iter().filter(|x| x.abs() > 1e-9).count();
+                    let sum: f32 = v.iter().map(|x| x.abs()).sum();
+                    format!("n={} nonzero={} absmean={:.3e}", v.len(), nz, sum / v.len().max(1) as f32)
+                }).unwrap_or_else(|e| format!("<err {e}>"));
+                let l = logits.flatten_all().and_then(|t| t.to_dtype(DType::F32)).and_then(|t| t.to_vec1::<f32>()).map(|v| {
+                    let nz = v.iter().filter(|x| x.abs() > 1e-9).count();
+                    let sum: f32 = v.iter().map(|x| x.abs()).sum();
+                    format!("n={} nonzero={} absmean={:.3e}", v.len(), nz, sum / v.len().max(1) as f32)
+                }).unwrap_or_else(|e| format!("<err {e}>"));
+                crate::log_debug!("MTP head step {step}: hidden_out {h}; logits {l}");
+            }
             let logits_last = if logits.dims().len() == 2 {
                 logits.get(logits.dim(0)? - 1)?
             } else {
