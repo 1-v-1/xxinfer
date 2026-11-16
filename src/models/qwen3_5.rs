@@ -534,6 +534,12 @@ impl Qwen3_5ForCausalLM {
     /// not the whole vocabulary.  The speculative decoding path uses it as
     /// the draft head's embedding, which it applies the same way as the
     /// main model does.
+    /// The table plus this rank's shard geometry, for the draft head.
+    pub fn embed_table(&self) -> (Tensor, usize, usize) {
+        let (off, rows) = self.embed_tokens.shard_geometry();
+        (self.embed_tokens.weight().clone(), off, rows)
+    }
+
     pub fn embed_weight(&self) -> Tensor {
         self.embed_tokens.weight()
     }

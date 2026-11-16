@@ -838,6 +838,12 @@ impl Qwen3VLForConditionalGeneration {
     ///
     /// The table is split across the ranks, so this is the local shard and
     /// not the whole vocabulary.
+    pub fn embed_table(&self) -> Option<(candle_core::Tensor, usize, usize)> {
+        let w = self.embed_weight()?;
+        let rows = w.dim(0).unwrap();
+        Some((w, 0, rows))
+    }
+
     pub fn embed_weight(&self) -> Option<candle_core::Tensor> {
         match &self.text_model {
             Qwen3TextModel::Dense35(m) => Some(m.embed_weight()),

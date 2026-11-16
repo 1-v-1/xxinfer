@@ -1986,6 +1986,12 @@ impl VocabParallelEmbedding {
     }
 
     /// The embedding rows this rank holds.
+    /// `(row_offset, rows)` for this rank: the draft head must shift global
+    /// token ids down to local rows exactly like `forward` does.
+    pub fn shard_geometry(&self) -> (usize, usize) {
+        (self.row_offset, self.rows)
+    }
+
     pub fn weight(&self) -> Tensor {
         self.weight.clone()
     }

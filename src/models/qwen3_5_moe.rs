@@ -652,6 +652,12 @@ impl Qwen3_5MoEForCausalLM {
         }
     }
 
+    pub fn embed_table(&self) -> (Tensor, usize, usize) {
+        let w = self.embed_tokens.embeddings().clone();
+        let rows = w.dim(0).unwrap();
+        (w, 0, rows)
+    }
+
     pub fn embed_weight(&self) -> &Tensor {
         self.embed_tokens.embeddings()
     }

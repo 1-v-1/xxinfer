@@ -233,11 +233,11 @@ impl ModelRunner {
         }
 
         // Step 2: Draft K tokens using MTP head (GPU-resident, no per-step CPU sync)
-        let embed_weight = match self.model() {
-            Model::Qwen3_5(m) => m.embed_weight(),
-            Model::Qwen3_5MoE(m) => m.embed_weight().clone(),
+        let embed_table = match self.model() {
+            Model::Qwen3_5(m) => m.embed_table(),
+            Model::Qwen3_5MoE(m) => m.embed_table(),
             Model::Qwen3VL(m) => m
-                .embed_weight()
+                .embed_table()
                 .expect("Qwen3VL MTP requires Qwen3.5 text backbone"),
             _ => unreachable!(),
         };
@@ -257,7 +257,7 @@ impl ModelRunner {
             &seq_hidden,
             &anchor_token_tensor,
             num_draft,
-            &embed_weight,
+            &embed_table,
             lm_head_fn,
             base_position,
         )?;
@@ -436,11 +436,11 @@ impl ModelRunner {
         seq_infos: &[SpecSeqInfo],
         mtp_head: Arc<Qwen3_5MtpHead>,
     ) -> Result<Vec<Vec<u32>>> {
-        let embed_weight = match self.model() {
-            Model::Qwen3_5(m) => m.embed_weight(),
-            Model::Qwen3_5MoE(m) => m.embed_weight().clone(),
+        let embed_table = match self.model() {
+            Model::Qwen3_5(m) => m.embed_table(),
+            Model::Qwen3_5MoE(m) => m.embed_table(),
             Model::Qwen3VL(m) => m
-                .embed_weight()
+                .embed_table()
                 .expect("Qwen3VL MTP requires Qwen3.5 text backbone"),
             _ => unreachable!(),
         };
@@ -471,7 +471,7 @@ impl ModelRunner {
                 &seq_hidden,
                 &anchor_tensor,
                 self.mtp_num_speculative,
-                &embed_weight,
+                &embed_table,
                 &lm_head_fn,
                 base_position,
             )?;
