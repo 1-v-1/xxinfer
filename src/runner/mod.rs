@@ -497,8 +497,9 @@ pub fn run_runner_process(args: Vec<String>) -> anyhow::Result<()> {
     use crate::utils::progress::{ProgressLike, ProgressReporter, RemoteProgressReporter};
 
     crate::log_info!("runner started");
+    // Same level switch as the parent process, or `XINFER_DIAG_*` output vanishes.
     tracing_subscriber::fmt()
-        .with_max_level(tracing::Level::INFO)
+        .with_max_level(crate::utils::env::log_level())
         .init();
 
     let sock = args

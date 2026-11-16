@@ -216,14 +216,20 @@ impl ModelRunner {
         let num_draft = self.mtp_num_speculative;
 
         // Step 1: Main model decode for logits + hidden state.
+        let dbg = crate::utils::env::diag_mtp();
         let dbg_t0 = std::time::Instant::now();
         let (anchor_token, seq_hidden) = self.mtp_decode_step1(seqs, seq_info)?;
-        if std::env::var("XINFER_MTP_DEBUG").is_ok() {
+        if dbg {
+            // The timer only covers GPU work once the stream is drained here;
+            // without this sync the reading is launch time, not step time.
             let _sync = seq_hidden
                 .narrow(0, 0, 1)
                 .and_then(|t| t.to_dtype(candle_core::DType::F32))
                 .and_then(|t| t.to_vec1::<f32>());
-            eprintln!("MTP step1 in {:.2} ms", dbg_t0.elapsed().as_secs_f64() * 1e3);
+            crate::log_debug!(
+                "MTP step1 in {:.2} ms",
+                dbg_t0.elapsed().as_secs_f64() * 1e3
+            );
         }
 
         // Step 2: Draft K tokens using MTP head (GPU-resident, no per-step CPU sync)
@@ -246,7 +252,7 @@ impl ModelRunner {
 
         let base_position = seq_info.len.saturating_sub(1);
         let anchor_token_tensor = Tensor::from_vec(vec![anchor_token], (1,), self.device())?;
-        let dbg_t0 = std::time::Instant::now();
+        let dbg_t1 = std::time::Instant::now();
         let (draft_tokens, _last_hidden) = mtp_head.draft_tokens_gpu(
             &seq_hidden,
             &anchor_token_tensor,
@@ -255,9 +261,12 @@ impl ModelRunner {
             lm_head_fn,
             base_position,
         )?;
-        if std::env::var("XINFER_MTP_DEBUG").is_ok() {
-            eprintln!("MTP draft {} tok in {:.2} ms",
-                      num_draft, dbg_t0.elapsed().as_secs_f64() * 1e3);
+        if dbg {
+            crate::log_debug!(
+                "MTP draft {} tok in {:.2} ms",
+                num_draft,
+                dbg_t1.elapsed().as_secs_f64() * 1e3
+            );
         }
 
         if draft_tokens.is_empty() {
@@ -295,7 +304,7 @@ impl ModelRunner {
         #[cfg(not(all(feature = "cuda", feature = "graph")))]
         let use_mtp_graph = false;
 
-        let dbg_t1 = std::time::Instant::now();
+        let dbg_t2 = std::time::Instant::now();
         let all_logits_result = if use_mtp_graph {
             #[cfg(all(feature = "cuda", feature = "graph"))]
             {
@@ -346,7 +355,6 @@ impl ModelRunner {
         } else {
             let kv_cache = self.get_kv_cache();
             let kv_pairs = kv_cache.as_pairs();
-            let dbg_t1 = std::time::Instant::now();
             let res = match self.model() {
                 Model::Qwen3_5(model) => model.forward(
                     &verify_input_ids,
@@ -375,13 +383,19 @@ impl ModelRunner {
             res
         };
         let all_logits = all_logits_result?;
-        if std::env::var("XINFER_MTP_DEBUG").is_ok() {
+        if dbg {
             let _sync = all_logits
                 .narrow(0, 0, 1)
                 .and_then(|t| t.to_dtype(candle_core::DType::F32))
                 .and_then(|t| t.to_vec1::<f32>());
-            eprintln!("MTP verify m={} in {:.2} ms",
-                      verify_len, dbg_t1.elapsed().as_secs_f64() * 1e3);
+            // `graph` is part of the measurement condition: a verify step that
+            // missed the captured MTP graph runs eagerly and is not comparable.
+            crate::log_debug!(
+                "MTP verify m={} graph={} in {:.2} ms",
+                verify_len,
+                use_mtp_graph,
+                dbg_t2.elapsed().as_secs_f64() * 1e3
+            );
         }
 
         let verify_result = verify_draft_greedy(&all_logits, &draft_tokens)?;

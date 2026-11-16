@@ -23,8 +23,10 @@ use xinfer::utils::progress::{ProgressLike, ProgressReporter, RemoteProgressRepo
 pub fn run_runner() -> anyhow::Result<()> {
     xinfer::log_info!("runner started");
 
+    // The runner is a separate process, and the MTP/GDN hot paths log at debug.
+    // Without the same level switch here, `XINFER_DIAG_*` output silently vanishes.
     tracing_subscriber::fmt()
-        .with_max_level(tracing::Level::INFO)
+        .with_max_level(xinfer::utils::env::log_level())
         .init();
     let args: Vec<String> = if let Ok(encoded) = std::env::var("XINFER_RUNNER_ARGS") {
         encoded.split('\x1f').map(String::from).collect()

@@ -160,3 +160,39 @@ pub fn soft_mask_disabled() -> bool {
             .unwrap_or(false)
     })
 }
+
+/// Root level of the binary's `tracing` subscriber. Defaults to `info`, which is
+/// the pre-existing behaviour; `XINFER_LOG_LEVEL=debug` is what makes the
+/// `XINFER_DIAG_*` breakdowns visible (D9 keeps those on `debug!`, off by default).
+pub const LOG_LEVEL_ENV: &str = "XINFER_LOG_LEVEL";
+
+static LOG_LEVEL: OnceLock<tracing::Level> = OnceLock::new();
+
+pub fn log_level() -> tracing::Level {
+    LOG_LEVEL
+        .get_or_init(|| {
+            env::var(LOG_LEVEL_ENV)
+                .ok()
+                .and_then(|v| match v.trim().to_lowercase().as_str() {
+                    s @ ("trace" | "debug" | "info" | "warn" | "error") => s.parse().ok(),
+                    _ => None,
+                })
+                .unwrap_or(tracing::Level::INFO)
+        })
+        .clone()
+}
+
+/// Per-step breakdown of one speculative-decode cycle (step1 / draft / verify).
+/// Part of the `XINFER_DIAG_*` family: default off, and read once through this
+/// `OnceLock` so the decode hot path never calls `env::var` (D9/D10).
+pub const DIAG_MTP_ENV: &str = "XINFER_DIAG_MTP";
+
+static DIAG_MTP: OnceLock<bool> = OnceLock::new();
+
+pub fn diag_mtp() -> bool {
+    *DIAG_MTP.get_or_init(|| {
+        env::var(DIAG_MTP_ENV)
+            .map(|v| matches!(v.trim().to_lowercase().as_str(), "1" | "true" | "yes"))
+            .unwrap_or(false)
+    })
+}

@@ -55,7 +55,7 @@ async fn run() -> Result<()> {
         return Ok(());
     }
     tracing_subscriber::fmt()
-        .with_max_level(tracing::Level::INFO)
+        .with_max_level(xinfer::utils::env::log_level())
         .init();
     let mut args = Args::parse();
     args.normalize_model_args()?;
