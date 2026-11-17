@@ -242,13 +242,11 @@ impl ModelRunner {
                 id: refs[0].id,
                 len: refs[0].len(),
                 block_table: refs[0].block_table.clone(),
-                accepted: refs[0].len(),
             },
             Seqs::DecodeVec(ref decoded) if decoded.len() == 1 => SpecSeqInfo {
                 id: decoded[0].id,
                 len: decoded[0].len,
                 block_table: decoded[0].block_tables.clone(),
-                accepted: decoded[0].last_block_tokens,
             },
             _ => {
                 let output = self.run(seqs, false)?;
@@ -475,7 +473,6 @@ impl ModelRunner {
                     id: seq.id,
                     len: seq.len(),
                     block_table: seq.block_table.clone(),
-                    accepted: seq.len(),
                 })
                 .collect::<Vec<_>>(),
             Seqs::DecodeVec(ref decoded) => decoded
@@ -484,7 +481,6 @@ impl ModelRunner {
                     id: seq.id,
                     len: seq.len,
                     block_table: seq.block_tables.clone(),
-                    accepted: seq.last_block_tokens,
                 })
                 .collect::<Vec<_>>(),
         };
