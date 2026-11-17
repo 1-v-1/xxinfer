@@ -1336,3 +1336,29 @@ SM70（`sm_version<80`）+ 单列 F32 标度 + 模型 dtype F16 ⇒ **QPN8 打�
 要判的是**GEMM 输出**而不是打包张量：下一步按 `XINFER_QPN8_DISABLE=1` 与默认各跑一次，
 比较同一阶段的幅值 —— 若关掉打包后 `out_proj` 输出回到输入量级，问题在 repack/内核；
 若两档一样，问题在别处。
+
+## 66. 真因确认：`fp8_qpn8_repack` 就是幅值爆炸的来源（case `d2#66`）
+
+同一层、同一请求，只切 `XINFER_QPN8_DISABLE`：
+
+| 阶段（prefill，n=189440） | QPN8 开（默认） | QPN8 关 |
+|---|---|---|
+| `L0 in_norm` | 4.816e1 | 4.816e1（同） |
+| `L0 attn_out` | **1.024e3** | **2.812e1** ✓ 与输入同量级 |
+| `L0 mlp_in` | 6.879e0 | 2.525e0 |
+| `L0 mlp_out` | 8.962e1 | 1.348e1 |
+| KV `L15 v` maxabs | 1.334e2 | 3.478e1 |
+
+生成质量（greedy，`temperature=0`，"capital of France, one word"）：
+
+- QPN8 开：输出塌成 token 0（§50 起的全部现象）
+- QPN8 关：**"The user asks for the capital of France in one word. The answer is Paris"** ✓
+
+⇒ 判据 ③ 的多项目标一次达成：`out_proj` 输出回到输入量级、逐层不再单调爬到 1.2e4、
+输出不再全 token 0。
+
+## 待办
+`fp8_qpn8_repack` 把 F32 标度降成 F16 并按 `[1, N]` 打包（`linear.rs:1552-1558`）。
+参考实现 `qpn/fp8.py` 的契约是 **标度保持 F32**（`if weight_scale_inv.dtype != torch.float32: .to(torch.float32)`）。
+下一步：查 `attention.rs` 的 `fp8_qpn8_repack` 为何产出 F16/转置布局，按参考实现修，
+而不是长期靠 `XINFER_QPN8_DISABLE` 绕过。
