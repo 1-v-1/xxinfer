@@ -541,18 +541,8 @@ impl Qwen3_5ForCausalLM {
     }
 
     pub fn embed_lookup(&self) -> Box<dyn Fn(&Tensor) -> candle_core::Result<Tensor> + 'static> {
-        let weight = self.embed_tokens.weight().clone();
-        let (off, rows) = self.embed_tokens.shard_geometry();
-        let gather = self.embed_tokens.gather_owned();
-        Box::new(move |t: &Tensor| {
-            let ids = t.to_dtype(candle_core::DType::U32)?; let ids = ids.flatten_all()?;
-            let off_t = Tensor::from_slice(&[off as u32], (1,), weight.device())?.broadcast_as(ids.shape())?;
-            let local = ids.broadcast_sub(&off_t)?;
-            let last = Tensor::from_slice(&[(rows as u32).saturating_sub(1)], (1,), weight.device())?.broadcast_as(local.shape())?;
-            let flag = local.broadcast_le(&last)?.to_dtype(local.dtype())?;
-            let got = weight.index_select(&local.broadcast_mul(&flag)?, 0)?.broadcast_mul(&flag.to_dtype(weight.dtype())?)?;
-            match &gather { Some(g) => g.apply(&got)?.sum(0), None => Ok(got) }
-    })
+        let e = self.embed_tokens.clone();
+        Box::new(move |t: &Tensor| e.forward(t))
     }
 
     pub fn embed_weight(&self) -> Tensor {

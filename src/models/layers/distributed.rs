@@ -1851,6 +1851,7 @@ fn pad_vocab_size(vocab_size: usize, world_size: usize) -> usize {
 /// 248k vocabulary expensive: the table is 2.5 GB, and half of it is
 /// duplicated on a two card setup.
 #[allow(dead_code)]
+#[derive(Clone)]
 pub struct VocabParallelEmbedding {
     weight: Tensor,
     /// The number of vocabulary rows this rank holds.
