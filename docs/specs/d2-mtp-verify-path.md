@@ -1422,3 +1422,21 @@ value = ((permuted << 8) & 0x8000) | ((permuted << 7) & 0x3f80);
 2. **MTP 路在"权重不被 qpn8 打包"的形态下起不来**：解包形态下每次调用要现取反量化副本，
    draft/verify 的额外缓冲放不下 ⇒ `CUDA_ERROR_OUT_OF_MEMORY`。
    所以 ④ 的加速比必须等 §68 的打包路数值探针出结论后才能出，不能靠绕过。
+
+## 70. 新探针 `qpn8_channel_probe`：打包路对逐通道标度是**数值忠实**的（case `d2#70`）
+
+补了 `tests/probes/qpn8_channel_probe.rs`（新文件 57 行，`[[example]]` 已注册），
+用 `[N=64, K=64]` e4m3 码 + 每通道一个标度 `[64,1]`（各通道量级不同）跑两路：
+
+| 记录 | maxabs | absmean |
+|---|---|---|
+| `packed`（`fp8_matmul`，块 `[1, K]` ⇒ 走 QPN8 打包） | **1.1407e-01** | 3.4869e-02 |
+| `gold`（`fp8_matmul_fallback`，朴素反量化 matmul） | **1.1407e-01** | 3.4872e-02 |
+
+两路 maxabs **完全相同**，absmean 只差第 5 位（F16 舍入）⇒ **权重侧打包路无罪**：
+它不改变量级，也不把逐通道标度施加到错轴。
+
+⇒ §66 的"QPN8 是根因"要收窄：ON/OFF 的 36× 差异不来自**权重标度**，
+而来自打包路对**激活侧**的处理 —— 打包路会把输入按每 16 个 K 一组量化
+（`fp8_qpn8_pack_input_f16` → `input_is_packed`），而 fallback 用原始 F16 激活。
+下一步就是把激活侧纳入差分（同一输入，比 packed/gold 在真实 K=5120、TP 分片形态下的输出）。

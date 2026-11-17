@@ -171,3 +171,8 @@ panic = "abort"
 [profile.test]
 inherits = "dev"
 panic = "abort"
+
+[[example]]
+name = "qpn8_channel_probe"
+path = "tests/probes/qpn8_channel_probe.rs"
+required-features = ["cuda"]
