@@ -8,6 +8,9 @@ pub struct SpecSeqInfo {
     pub id: usize,
     pub len: usize,
     pub block_table: Vec<u32>,
+    /// Tokens the step that produced this state actually committed.
+    /// The verify kernel's replay route replays exactly this many rows.
+    pub accepted: usize,
 }
 
 impl ModelRunner {
@@ -186,7 +189,7 @@ impl ModelRunner {
             )?),
             block_tables_host: Some(vec![seq_info.block_table.clone()]),
             context_lens_host: Some(vec![total_kv_len]),
-            seqlens: None,
+            seqlens: Some(vec![seq_info.accepted as u32]),
             cu_seqlens_q: Some(Tensor::from_vec(
                 vec![0u32, q_len as u32],
                 (2,),
@@ -367,7 +370,7 @@ impl ModelRunner {
             max_seqlen_q,
             max_seqlen_k,
             max_context_len: max_seqlen_k,
-            seqlens: None,
+            seqlens: Some(seq_infos.iter().map(|s| s.accepted as u32).collect()),
             flashinfer_metadata,
             is_mtp_verify: true,
         })

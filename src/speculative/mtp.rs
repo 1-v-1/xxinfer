@@ -191,6 +191,7 @@ impl ModelRunner {
                         id: seq.id,
                         len: seq.len(),
                         block_table: seq.block_table.clone(),
+                        accepted: seq.len(),
                     })
                     .collect();
                 (s.len(), infos)
@@ -202,6 +203,7 @@ impl ModelRunner {
                         id: ds.id,
                         len: ds.len,
                         block_table: ds.block_tables.clone(),
+                        accepted: ds.last_block_tokens,
                     })
                     .collect();
                 (d.len(), infos)
