@@ -227,3 +227,12 @@ pub fn mtp_verify_uses_decode_kernel() -> bool {
             .unwrap_or(false)
     })
 }
+
+/// QPN8 打包路在逐通道形态上不等价于朴素反量化 matmul（§73：真实形状下直接 inf），
+/// 参考实现（qpn/fp8.py）的契约是标度保持 F32、不重排。故默认不启用；
+/// 设 XINFER_QPN8_REPACK=1 显式开启以保留该内核覆盖。
+pub const QPN8_REPACK_ENV: &str = "XINFER_QPN8_REPACK";
+static QPN8_REPACK: OnceLock<bool> = OnceLock::new();
+pub fn qpn8_repack_enabled() -> bool {
+    *QPN8_REPACK.get_or_init(|| std::env::var(QPN8_REPACK_ENV).is_ok())
+}

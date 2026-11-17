@@ -1532,7 +1532,7 @@ fn load_ln_fp8_with_hints(
         && weight_scale.dims2().map(|(_, c)| c == 1).unwrap_or(false)
         && sm_version < 80
         && weight_scale.dtype() == DType::F32
-        && std::env::var("XINFER_QPN8_DISABLE").is_err()
+        && crate::utils::env::qpn8_repack_enabled()
     {
         attention_rs::fp8_linear::fp8_qpn8_repack(&weight, &weight_scale)?
     } else {

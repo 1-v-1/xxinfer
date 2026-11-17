@@ -1460,3 +1460,25 @@ value = ((permuted << 8) & 0x8000) | ((permuted << 7) & 0x3f80);
 `((p<<8)&0x8000) | ((p<<7)&0x3f80)` 按位拼 half，它**不是通用 e4m3 解码器**——
 它要求字节已按 half 偏置好；而 `channel_scales` 又统一 `×256`。
 两者对"检查点原始 e4m3 字节"这一路是否成立，是下一步要对着参考实现核对的点。
+
+## 74. 修复落地：QPN8 打包路由 `env::qpn8_repack_enabled()` 门控，默认关闭（case `d2#74`）
+
+§73 的分解（`N=3072, K=5120`，真实量级）：
+
+| 记录 | maxabs | 说明 |
+|---|---|---|
+| `rp.scale` | 6.7932e-02 | = 检查点逐通道标度量级（§50.4 的 z≈6.8e-2）✓ |
+| `rp.codes` | 1.9200e+02 | 原始 e4m3 字节（0xC0=192）✓ |
+| `real.gold` | 2.1470e-04 | 朴素反量化 matmul ✓ 有限 |
+| `real.packed` | **inf** | 与 `block_size`、`input_is_packed` 取值无关 |
+
+⇒ 打包路在真实形状 + 真实量级下不等价于朴素反量化 matmul。
+参考实现 `qpn/fp8.py` 的契约是「标度保持 F32、不重排」，打包路是本地发明。
+
+**改动**（D10）：`src/utils/env.rs` 新增 `QPN8_REPACK_ENV = "XINFER_QPN8_REPACK"` 与
+`qpn8_repack_enabled()`；`linear.rs` 的门控由 `std::env::var("XINFER_QPN8_DISABLE").is_err()`
+（默认开、要人记得关）改为 `crate::utils::env::qpn8_repack_enabled()`（默认关、要人显式开）。
+`linear.rs` 行数不变（1955），`env.rs` 229→238。
+
+**验证**：`env -u XINFER_QPN8_DISABLE`（即不设任何相关变量）跑 greedy：
+输出 `"The user asks for the capital of France in one word. The answer is Paris"` ✓
