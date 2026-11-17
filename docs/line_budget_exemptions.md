@@ -2,7 +2,7 @@
 
 > 规则见 [CONVENTIONS.md](<./CONVENTIONS.md>) §3.1，决策见 [DECISIONS.md](<./DECISIONS.md>) D18。
 > 豁免只在**文件头**写 `// line-budget: exempt <理由>` 才生效，且必须登记到本表——**未登记的豁免视为违规**。
-> 检查器 `scripts/check_line_budget.py` 会自动跳过带标记的文件，并在此表的登记项上核对。
+> 检查器 `scripts/check_line_budget.py` 会跳过带标记的文件，并核对本表：**声明豁免但未登记 → ERROR**；本表有登记但文件已无标记 → INFO（过期登记，提示清理）。
 
 ## 登记格式
 
