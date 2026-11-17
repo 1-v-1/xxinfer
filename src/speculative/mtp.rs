@@ -214,11 +214,56 @@ impl ModelRunner {
 
         let seq_info = &seq_infos[0];
         let num_draft = self.mtp_num_speculative;
+        let seq_id = seq_info.id;
+        let dbg = crate::utils::env::diag_mtp();
+
+        // 1Cat form: one target forward per step.  The anchor token and the
+        // hidden row of the last committed token are carried over from the
+        // previous verify forward, so only the first step of a sequence pays
+        // for a separate single-token forward.
+        //
+        // The carried context is only valid for the sequence length it was
+        // produced for; a mismatch (finished sequence, reused id) falls back
+        // to the single-token forward instead of feeding a stale hidden.
+        let cached_ctx = {
+            let mut ctx = self.mtp_step_ctx.lock().unwrap();
+            let hit = ctx.get(&seq_id).map(|(_, _, expect)| *expect == seq_info.len);
+            let expect = ctx.get(&seq_id).map(|(_, _, expect)| *expect);
+            if dbg {
+                crate::log_debug!(
+                    "MTP ctx lookup: seq={seq_id} len={} expect={expect:?} hit={hit:?}",
+                    seq_info.len
+                );
+            }
+            match ctx.get(&seq_id) {
+                Some((_, _, expect_len)) if *expect_len == seq_info.len => ctx.remove(&seq_id),
+                Some(_) => {
+                    ctx.remove(&seq_id);
+                    None
+                }
+                None => None,
+            }
+        };
+        let use_1cat = cached_ctx.is_some();
 
         // Step 1: Main model decode for logits + hidden state.
-        let dbg = crate::utils::env::diag_mtp();
         let dbg_t0 = std::time::Instant::now();
-        let (anchor_token, seq_hidden) = self.mtp_decode_step1(seqs, seq_info)?;
+        let (anchor_token, seq_hidden) = match cached_ctx {
+            Some((tok, hidden, _)) => {
+                crate::log_debug!("MTP 1Cat: reuse anchor {} from the previous verify", tok);
+                (tok, hidden)
+            }
+            None => self.mtp_decode_step1(seqs, seq_info)?,
+        };
+
+        // The carried anchor is the *last committed* token, so the verify query
+        // rows start one position earlier than in the legacy two-forward flow.
+        let shifted_info = SpecSeqInfo {
+            id: seq_info.id,
+            len: seq_info.len.saturating_sub(1),
+            block_table: seq_info.block_table.clone(),
+        };
+        let verify_info: &SpecSeqInfo = if use_1cat { &shifted_info } else { seq_info };
         if dbg {
             // The timer only covers GPU work once the stream is drained here;
             // without this sync the reading is launch time, not step time.
@@ -280,19 +325,19 @@ impl ModelRunner {
 
         let block_size = self.block_size();
         let slot_mappings =
-            self.compute_slot_mappings(seq_info, verify_len, block_size, "verify")?;
+            self.compute_slot_mappings(verify_info, verify_len, block_size, "verify")?;
 
         let verify_input_ids = Tensor::from_vec(verify_tokens, (verify_len,), self.device())?;
         let verify_positions_tensor = Tensor::from_vec(
             (0..verify_len)
-                .map(|i| (seq_info.len + i) as i64)
+                .map(|i| (verify_info.len + i) as i64)
                 .collect::<Vec<_>>(),
             (verify_len,),
             self.device(),
         )?;
 
         let verify_metadata =
-            self.build_verify_metadata(seq_info, &slot_mappings[..verify_len], verify_len)?;
+            self.build_verify_metadata(verify_info, &slot_mappings[..verify_len], verify_len)?;
 
         let _prefill_guard = set_linear_is_prefill(true);
 
@@ -309,7 +354,7 @@ impl ModelRunner {
             #[cfg(all(feature = "cuda", feature = "graph"))]
             {
                 // Hold mamba cache across verify-graph replay (same as decode graphs).
-                match self.model() {
+                let replayed = match self.model() {
                     Model::Qwen3_5(model) => {
                         let _guard = model.lock_mamba_cache_for_graph();
                         self.mtp_capturer.as_ref().unwrap().replay_mtp(
@@ -346,7 +391,10 @@ impl ModelRunner {
                         &verify_positions_tensor,
                         &verify_metadata,
                     ),
-                }
+                };
+                // The captured graph exposes logits only, so the 1Cat hidden
+                // hand-off is unavailable on this path.
+                replayed.map(|t| (t, None))
             }
             #[cfg(not(all(feature = "cuda", feature = "graph")))]
             {
@@ -355,34 +403,46 @@ impl ModelRunner {
         } else {
             let kv_cache = self.get_kv_cache();
             let kv_pairs = kv_cache.as_pairs();
+            // The 1Cat flow needs the per-row hidden states of the verify
+            // forward: the next step's MTP head runs on the hidden row of the
+            // last committed token.
             let res = match self.model() {
-                Model::Qwen3_5(model) => model.forward(
-                    &verify_input_ids,
-                    &verify_positions_tensor,
-                    kv_pairs,
-                    &verify_metadata,
-                    false,
-                ),
-                Model::Qwen3_5MoE(model) => model.forward(
-                    &verify_input_ids,
-                    &verify_positions_tensor,
-                    kv_pairs,
-                    &verify_metadata,
-                    false,
-                ),
-                Model::Qwen3VL(model) => model.forward(
-                    &verify_input_ids,
-                    &verify_positions_tensor,
-                    kv_pairs,
-                    &verify_metadata,
-                    None,
-                ),
+                Model::Qwen3_5(model) => {
+                    let (logits, hidden) = model.forward_with_hidden(
+                        &verify_input_ids,
+                        &verify_positions_tensor,
+                        kv_pairs,
+                        &verify_metadata,
+                        false,
+                    )?;
+                    Ok((logits, Some(hidden)))
+                }
+                Model::Qwen3_5MoE(model) => {
+                    let (logits, hidden) = model.forward_with_hidden(
+                        &verify_input_ids,
+                        &verify_positions_tensor,
+                        kv_pairs,
+                        &verify_metadata,
+                        false,
+                    )?;
+                    Ok((logits, Some(hidden)))
+                }
+                Model::Qwen3VL(model) => {
+                    let (logits, hidden) = model.forward_with_hidden(
+                        &verify_input_ids,
+                        &verify_positions_tensor,
+                        kv_pairs,
+                        &verify_metadata,
+                        false,
+                    )?;
+                    Ok((logits, Some(hidden)))
+                }
                 _ => unreachable!(),
             };
             drop(kv_cache);
             res
         };
-        let all_logits = all_logits_result?;
+        let (all_logits, verify_hidden) = all_logits_result?;
         if dbg {
             let _sync = all_logits
                 .narrow(0, 0, 1)
@@ -400,6 +460,39 @@ impl ModelRunner {
 
         let verify_result = verify_draft_greedy(&all_logits, &draft_tokens)?;
 
+        // Feed the next step (1Cat): the anchor is this step's continuation
+        // token, the hidden is the row of the last committed input token
+        // (row == num_accepted) and the length is the sequence length the
+        // engine will have after the committed tokens are appended.
+        if let Some(hidden) = verify_hidden {
+            if dbg {
+                crate::log_debug!(
+                    "MTP ctx store: hidden dims={:?} row={}",
+                    hidden.dims(),
+                    verify_result.num_accepted
+                );
+            }
+            if let Ok(row) = hidden.get(verify_result.num_accepted) {
+                // The engine appends every token this step returns, so the next
+                // step sees `len + <returned count>`. 1Cat already had the anchor
+                // in the sequence, so it commits one token fewer than the legacy
+                // two-forward flow.
+                let next_len = seq_info.len
+                    + verify_result.num_accepted
+                    + if use_1cat { 1 } else { 2 };
+                let mut ctx = self.mtp_step_ctx.lock().unwrap();
+                ctx.insert(
+                    seq_id,
+                    (verify_result.continuation_token, row.to_owned(), next_len),
+                );
+            }
+        } else if dbg {
+            crate::log_debug!(
+                "MTP ctx store skipped: verify hidden unavailable (variant={})",
+                self.model().variant_name()
+            );
+        }
+
         // 1Cat has no rollback: the accepted count is the state column the kernel
         // reads (num_accepted_tokens = diff(query_start_loc)); rejected columns
         // are simply never selected again.
@@ -407,8 +500,13 @@ impl ModelRunner {
             candle_core::Error::msg("verify metadata has no query axis"))?;
         let _ = &step_token_count;
 
-        let mut result_tokens = Vec::with_capacity(2 + verify_result.num_accepted);
-        result_tokens.push(anchor_token);
+        // In 1Cat form the anchor is already part of the sequence (it was the
+        // previous step's continuation token), so only the newly committed tokens
+        // are returned; the legacy flow still returns its own anchor.
+        let mut result_tokens = Vec::with_capacity(1 + verify_result.num_accepted);
+        if !use_1cat {
+            result_tokens.push(anchor_token);
+        }
         result_tokens.extend_from_slice(&verify_result.accepted_tokens);
         result_tokens.push(verify_result.continuation_token);
 

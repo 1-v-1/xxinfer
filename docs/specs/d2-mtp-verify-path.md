@@ -943,3 +943,55 @@ K cache 里有 NaN ⇒ **cache 的"写"或"读"与分配形状不一致**。
 - 定位 1 需要"KV 写入后立刻回读"的探针（写内核与读内核都不动，只加回读）。
 - 定位 2 需要把 GDN 状态推进量与"已提交 token 数"对齐：要么走内核 REPLAY 路
   （§47 证伪过：`rn` 传错），要么在 1Cat 形式下让主干前向只跑一次。
+
+
+## 50. 1Cat 形式真正落地并生效（case `d2#50`）
+
+### 50.1 判据
+
+单序列 MTP 每步只跑 **一次** 主干前向（verify 的 `[anchor, d1..dK]`），
+anchor 与其 hidden 行由上一步验算带过来；日志里必须看到 `MTP 1Cat: reuse anchor`，
+且 A/B 表要给出真实 token 数（服务端 `Decoded:` 行），不是 SSE 分片数（D12）。
+
+### 50.2 为什么之前一直没生效（三处，全修）
+
+| # | 缺陷 | 证据 | 修法 |
+|---|---|---|---|
+| 1 | 验算分支拿不到 hidden | `ctx store skipped: verify hidden unavailable (variant=Qwen3VL)` —— 27B 走的是 `Qwen3VL` 变体，该分支用 `forward`（只回 logits） | 改 `forward_with_hidden`，与另两个变体一致 |
+| 2 | 期望长度用错语义 | `ctx lookup: len=38 expect=None` —— `next_len` 用 legacy 的 `len+num_accepted+2`，而 1Cat 步只提交 `num_accepted+1` | `+ if use_1cat {1} else {2}` |
+| 3 | anchor 被当新 token 重复提交 | 返回 vec 含 `anchor_token`，而引擎把返回的全部 token 追加进序列 | 1Cat 路不再 push anchor |
+
+### 50.3 A/B（真实 token 数）
+
+条件：`unsloth/Qwen3.8-27B-NVFP4`（HF 缓存，未下载）、2 卡 TP=2、`--disable-cuda-graph`、
+K=3、prompt 37 token、生成 64 token、`temperature=0`、`XINFER_DIAG_MTP=1`、`XINFER_DIAG_NAN=0`
+（探针自身扰动时序敏感路径，§49.2）。
+
+| 路 | 服务端自报 | 比值 |
+|---|---|---|
+| mtp=0 | 64 token / 1.51 s = **42.38 t/s** | 1.00 |
+| mtp=1（1Cat 生效，reuse=30） | 64 token / 0.86 s = **74.77 t/s** | **1.76** |
+
+分步计时（同次运行）：`step1 36.37 ms`（现在只在序列第一步付一次）、`draft 3 tok 12.49 ms`、
+`verify m=4 32.39 ms`。legacy 路每步都要付 step1，1Cat 把它从每步成本里消掉了。
+
+⚠ 这个 1.76× 还不是可引用的加速比：接受率虚高（见 50.4，全部 token=0 ⇒ 3/3 全采），
+真实模型上 K=3 的接受率会低得多。
+
+### 50.4 输出质量的真正落点（取代 §49.4 的首要项）
+
+`XINFER_DIAG_NAN=1` 逐阶段幅值（第 0 层，prefill，37 token）：
+
+```
+embed 5.469e-1 → in_norm 4.816e1 → qkv_proj 6.053e1 → recur 3.984e0
+      → gated 2.306e-1 → out_proj 1.024e3
+mlp_in 6.879e0 → mlp_out 8.962e1
+```
+
+逐层残差流 maxabs 单调爬到 `1.2e4`（65 项全有限，`first_bad=None`）。
+⇒ **不是 NaN，是幅值**：每层子模块相对其（已归一的）输入放大了 10~4000 倍，
+残差流被最后几层支配，logits 的 argmax 恒为 token 0。
+`gdn0 gated`（0.23）与 `out_proj`（×4400）是最大的一段，MLP 段同样放大 ×13。
+
+§49.4 的“KV cache 内容被写坏”仍是待查项（V cache 恒 512.0、K cache 带 NaN 仍待复现），
+但本次证据把首要异常定在 **子模块输出相对输入的放大比**，不是 cache 读法。

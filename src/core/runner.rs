@@ -311,6 +311,11 @@ pub struct ModelRunner {
     pub(crate) mtp_num_speculative: usize,
     /// Optional external DFlash2 drafter.
     pub(crate) dflash_drafter: Option<crate::speculative::DFlashDrafter>,
+    /// 1Cat-style MTP step context: the anchor token, the hidden row of the
+    /// last committed token and the sequence length it belongs to.  Carrying
+    /// it from the previous verify forward is what lets a step run exactly
+    /// one target forward instead of two.
+    pub(crate) mtp_step_ctx: Mutex<HashMap<usize, (u32, candle_core::Tensor, usize)>>,
 }
 
 impl ModelRunner {
@@ -1060,6 +1065,7 @@ impl ModelRunner {
             mtp_head,
             mtp_num_speculative,
             dflash_drafter,
+            mtp_step_ctx: Mutex::new(HashMap::new()),
         })
     }
 

@@ -50,6 +50,13 @@ HTTP → server/parser.rs → core/scheduler.rs → core/runner.rs → core/engi
 ```
 **三种前向形态分开测，不得互相外推**：prefill（`is_prefill`，chunked GDN / dequant）、decode（M=1..N 的 GEMV，最吃单序列延迟）、MTP verify（M=T 投机步数，`gdn_verify_mtp` 一个内核跑完 T 步递推）。
 
+**1Cat 步上下文契约（`src/speculative/mtp.rs` × `core/runner.rs::mtp_step_ctx`）**：每步只做一次主干前向。
+上一步验算返回的 `(continuation_token, hidden[num_accepted], len_after_commit)` 存进 `mtp_step_ctx`，
+下一步命中（`expect_len == seq_info.len`）就直接拿它当 anchor，不再跑 1-token 的 `mtp_decode_step1`；
+验算查询从 `len-1` 起（anchor 已在缓存里），因此本步提交 `num_accepted+1` 个 token，
+而 legacy 双前向路提交 `num_accepted+2`。长度对不上（序列结束、id 复用）就退回 `mtp_decode_step1`，
+绝不喂过期 hidden。
+
 ## 5. 硬件硬约束（SM70 / V100）
 - **无** `cp.async` / LDGSTS / TMA / 异步事务屏障；只能软件级 named-barrier `LDG→GPR→STS` 替代。
 - occupancy 是最大杠杆：BM32 胜出靠 **64 regs/thread + 41.94 KB shared + 2 CTA/SM**；FA2 风格 M64（128 regs、83.47 KB、1 CTA/SM）虽把 L1 global-load sectors 降 16.3%，墙钟仍回退 2.0%。

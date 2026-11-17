@@ -41,8 +41,12 @@ OUT = os.path.join(os.environ.get("XINFER_PROBE_DIR", "/workspace/probe-out"), "
 
 def env_for(mtp_on):
     e = dict(os.environ)
+    # XINFER_DIAG_NAN：逐层非有限值探针（GPU 侧计数，一次 D2H）。默认关：
+    # 探针自身会扰动时序敏感的 attention 路径（§49.2），只在定位时显式打开。
     e.update(HF_HUB_OFFLINE="1", XINFER_ONESHOT_DISABLE="1", XINFER_MTP_RESERVE_MB="128",
-             XINFER_DIAG_LOGITS="1", XINFER_DIAG_MTP="1", XINFER_LOG_LEVEL="debug")
+             XINFER_DIAG_LOGITS="1", XINFER_DIAG_MTP="1",
+             XINFER_DIAG_NAN=os.environ.get("XINFER_DIAG_NAN", "0"),
+             XINFER_LOG_LEVEL="debug")
     if OK == "0":
         e["XINFER_DISABLE_CUDA_GRAPH"] = "1"
     # A/B switch for §12/§14 lever 2.  Read from a file so the harness's
