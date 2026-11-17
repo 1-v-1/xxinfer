@@ -1669,3 +1669,22 @@ MTP 要真正提速，卡点是让 `m=4` 的 verify 也能走图，而不是继�
 
 ⇒ 判据 ④ 的可引用比值就是 §80 那张表（43.29 vs 12.66 t/s，×3.4 慢），
 且它慢的原因是**结构性**的：eager 无批摊销 + 本机装不下图。不是标度路径的问题（①②③ 已修）。
+
+## 84. 图装不下的接线缺口（case `d2#84`）
+
+`runner.rs:649` 对 hybrid-mamba 模型取 `graph_capture_max_num_seqs = mamba_cache_capacity`，
+而 `planned_graph_capture_batches` 会**为 1..=容量 的每个精确批各捕一张**（实测容量 = 10）⇒
+捕获池里同时驻留 10 套中间量。`graph.rs` 里那个"设备吃不起时每整数批一张"的几何阶梯
+`sparse_graph_capture_batches`（1,2,4,…,cap）**只被 graph.rs 自己的测试引用，runner 从未调用它**。
+
+```rust
+// runner.rs:649
+let graph_capture_max_num_seqs = if is_hybrid_mamba_model { mamba_cache_capacity.max(1) } ...
+// runner.rs:658
+let capture_capacity = planned_graph_capture_batches(graph_capture_max_num_seqs).into_iter().max()
+```
+
+⇒ 本机 16 GB 上"捕满 1..10"就是 §83 那个 `Graph capture failed: OOM` 的直接来源。
+把它换成 `sparse_*` 可把捕获套数从 10 降到 4（1,2,4,8,10），但 hybrid 的注释说
+"state-slot mapping cannot be padded safely"，所以这一步要连着验证 replay 选
+`>= bs` 的那张图时状态槽是否对得上 —— 属于新特性，超出本目标（本目标只要加速比可引用）。
