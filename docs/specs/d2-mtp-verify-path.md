@@ -536,3 +536,26 @@ else:
 ### ③ 对 xinfer 的含义
 
 `mtp.rs` 现在是 draft(5.28) + verify(32.27) + `rollback_mamba` 三段。1Cat 的形态是**一次启动、二维索引、接受数当下选行**。所以 §14 那个"一步 60.9 ms 换 1.97 token"在 1Cat 形态下不存在：没有独立 draft 段，也没有回滚段。
+
+## 30. 二分到底：坏的只有 `norm_embed` 那一路的**输入**
+
+三处 `a0ff64b` 改动全部回退后（`224f2d9`/`dbdbd0a`/`69bcade`），四段探针实测：
+
+| 段 | 实测 |
+|---|---|
+| `MTP draft in: hidden` | `n=5120 nonzero=5119 nan=0 absmean=1.042e0` ✅ |
+| `MTP head norm_hidden` | `n=5120 nan=0 absmean=5.671e-1` ✅ |
+| **`MTP head norm_embed`** | `n=5120 nan=5120 absmean=NaN` ❌ |
+
+两个 norm 的构造**完全相同**（同一个 `rms_norm`、同一个 `is_gemma`）。差别只在输入：
+
+```rust
+let norm_hidden = self.pre_fc_norm_hidden.forward(backbone_hidden)?;   // 健康
+let norm_embed  = self.pre_fc_norm_embedding.forward(token_embedding)?; // 全 NaN
+```
+
+`token_embedding = embed_lookup(anchor)`，现在直接委托 `VocabParallelEmbedding::forward`。
+
+## 顺带纠正一条我写错的推断
+
+`eos_token_id = 248044`（检查点 `config.json`）。`target` 里连出的 `248046` **不是 eos**，所以"这一格没有续写"不成立。
