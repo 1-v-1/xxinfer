@@ -579,3 +579,23 @@ MTP head token_embed: n=5120 nan=154 absmean=NaN
 ## 所以 §22/§24/§27/§28 全是下游症状
 
 真正要查的是**嵌入表本地分片里那 154 个元素为什么是未初始化**：`27B` 的 `vocab=248320`，`248320 / 2 = 124160`，nvfp4 按块量化，尾部块不满一个整块时会留下没被写到的元素。
+
+## 33. 一步跑两遍整模型 —— 这才是那处算力浪费
+
+`mtp.rs` 把 `set_linear_is_prefill` 切了两次，各盖一次**整模型前向**：
+
+| 行 | 开关 | 盖住的那次前向 | 形状 |
+|---|---|---|---|
+| `:21` | `false` | 主干 decode 前向（`:37` `decode_capturer.replay(...)`，走图）| 每序列 **1 行** |
+| `:297` / `:504` | `true` | verify 前向 | 每序列 **1+K 行** |
+
+`:24-25` 的注释自己写着：*"stores hidden states in `last_hidden_for_mtp` during both capture and replay"* —— 也就是**第 ① 次产出的 `last_hidden_for_mtp`，第 ② 次又产了一遍**，而 anchor token 本身也是上一步 verify 已经算出来的。
+
+| | 整模型前向次数 | 实测 |
+|---|---|---|
+| MTP 关 | 1（decode GEMV）| `22.9 ms` → 43.9 |
+| MTP 开 | **2**（decode GEMV + prefill GEMM）| `5.28 + 32.27 = 37.55 ms` |
+
+## 1Cat 形态 = 一次
+
+`state_indices [batch, 1+K]` 二维 + `num_accepted = diff(query_start_loc)` 内核里选行：草稿要的是**同一次前向**顺带产出的 hidden，不是再跑一遍主干。
