@@ -559,3 +559,23 @@ let norm_embed  = self.pre_fc_norm_embedding.forward(token_embedding)?; // 全 N
 ## 顺带纠正一条我写错的推断
 
 `eos_token_id = 248044`（检查点 `config.json`）。`target` 里连出的 `248046` **不是 eos**，所以"这一格没有续写"不成立。
+
+## 31. 根因不在草稿头 —— 查表输出本身就带 NaN
+
+本轮把观测打在查表输出上，实测：
+
+```
+MTP head token_embed: n=5120 nan=154 absmean=NaN
+```
+
+**不是全 NaN，是 5120 个里 154 个。** 这改变了整件事的性质：
+
+| 之前以为 | 实测 |
+|---|---|
+| `norm_embed` 全 NaN ⇒ 权重没绑上 | 输入 `token_embed` 就带 154 个 NaN |
+
+链条：一行 5120 里带 154 个 NaN → `rms_norm` 的 `mean(x²)` 变 NaN → `norm_embed` **整行** NaN → `cat` 后整段 NaN → `logits` 全 NaN → `argmax(全相等)=0` → `draft=[0,0,0]`。
+
+## 所以 §22/§24/§27/§28 全是下游症状
+
+真正要查的是**嵌入表本地分片里那 154 个元素为什么是未初始化**：`27B` 的 `vocab=248320`，`248320 / 2 = 124160`，nvfp4 按块量化，尾部块不满一个整块时会留下没被写到的元素。
