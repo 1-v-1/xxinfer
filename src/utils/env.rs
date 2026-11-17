@@ -197,6 +197,21 @@ pub fn diag_mtp() -> bool {
     })
 }
 
+/// Per-layer NaN probe for the backbone forward.  Off by default; read once
+/// through the `OnceLock` so the hot path never calls `env::var` (D9/D10).
+/// Used to localise the first layer whose hidden state turns into NaN.
+pub const DIAG_NAN_ENV: &str = "XINFER_DIAG_NAN";
+
+static DIAG_NAN: OnceLock<bool> = OnceLock::new();
+
+pub fn diag_nan() -> bool {
+    *DIAG_NAN.get_or_init(|| {
+        env::var(DIAG_NAN_ENV)
+            .map(|v| matches!(v.trim().to_lowercase().as_str(), "1" | "true" | "yes"))
+            .unwrap_or(false)
+    })
+}
+
 /// Route the speculative verify step through the batched *decode* kernel instead
 /// of the prefill one.  The verify step currently pays more than a whole ordinary
 /// decode step (§14: 32.27 ms vs 22.9 ms) because it runs the prefill kernel, which

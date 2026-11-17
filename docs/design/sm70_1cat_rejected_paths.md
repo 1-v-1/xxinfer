@@ -1043,3 +1043,5 @@ python -m tools.sm70_route_snapshot --category dflash2 \
 | 证伪：调用侧把 nacc/s_idx/s_state/槽位改成二维喂 | mtp=1 四格全 ILLEGAL_ADDRESS，回退后恢复可跑 | d2#34-42 |
 | 证伪：给 SpecSeqInfo 加 accepted 字段喂 rn | 四处构造处开档形状不一（两处 match 臂、两处 .map 闭包），改写闭合符反复错位 | d2#46 |
 | 证伪：给引擎配 replay 参数走内核 `REPLAY=true`（rbuf/rn/rmap/ctr） | `rn` 传的是本步提议数 `1+K` 而非上一步已提交数，`R0` 把状态推过头；mtp=1 四格全 0.0（`MTP runner returned empty response`）。被回退 sha `df556ab`(fork)/`8db927d`(引擎)，内核的 `REPLAY` 模板仍留在 `gdn_verify_sm70.cu` 未动，覆盖区间＝引擎侧接线 | d2#47-48 |
+| 证伪：FlashInfer decode 读 cache 的方式与写侧布局不一致 | `XINFER_SKIP_FLASHINFER=1` 换原生 `paged_attention` 读同一份 cache，普通路径 decode 仍在第 3 层起出 inf（见 d2#49）| d2#49 |
+| 证伪：GDN 状态在 prefill 阶段就溢出（状态是 NaN 源头）| prefill 后逐层 conv/rec 状态全部有限（幅值 0.1~70），状态变 inf 发生在 hidden 已经非有限之后（见 d2#49）| d2#49 |

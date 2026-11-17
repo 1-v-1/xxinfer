@@ -863,3 +863,83 @@ if constexpr (REPLAY) {
   现有 `mtp_probe`（`qwen3_5_mtp.rs:464`）只在 MTP 路径里打点，主干侧没有对应打点。
 - 定位 2 需要 GDN 状态**逐层**的 NaN 计数（`recurrent_state`），现在只有 `token_embed`/`norm_embed` 一层的痕迹（§32）。
 - 测量口径：探针的 token 计数要改成真 token 数（服务端回报 `output_len`），否则长上下文那格永远会被残跑污染。
+
+---
+
+## 49. 逐层探针（非扰动版）定位 NaN 的产生位置
+
+### 49.1 判据
+
+要在真模型（`unsloth/Qwen3.8-27B-NVFP4`，2 卡）上把"第几个前向、第几层、哪个张量"
+第一次出现非有限值说清楚，且**探针本身不得改变被测对象的行为**。
+
+### 49.2 现状实测
+
+**探针形态的修正**：第一版探针在每层之后把 hidden 拉回主机（`to_vec1`），
+等于每层一次同步；实测它把 **prefill 从"有限"变成"第 3 层起全 inf"** ——
+即探针本身扰动了时序敏感的 attention 路径（见 49.3）。改为
+"每层只在 GPU 上算标量（非有限值计数、最大绝对值），整个前向末尾一次性读回"，
+前向内只剩一次同步，结论才可信。
+
+**逐层结果**（`XINFER_DIAG_NAN=1`，`[nan] per-layer` 行；65 = 1 个 embedding + 64 层）：
+
+| 前向 | 普通路径（mtp=0） | MTP 路径（mtp=1） |
+|---|---|---|
+| prefill | 全层 0 个非有限值，最大幅值 0.55 → 1.13e4 | 同左 |
+| 第 1 个 decode | **首个非有限层 = 索引 4（解码器第 3 层，attn 层）** | **首个非有限层 = 索引 48（解码器第 47 层，attn 层）** |
+
+⇒ prefill 干净、**第一个 decode 步就坏**；两条路径坏在不同的深度，
+但都是全注意力层 ⇒ 指向"decode 步读到的 KV/状态"而不是权重或 embedding。
+
+**GDN 状态**（`[nan] gdn state` 行，逐层 conv/rec 状态）：
+
+| 时点 | conv 状态 | rec 状态 |
+|---|---|---|
+| prefill 后 | 全部有限，幅值 0.1~70 | 全部有限 |
+| 第 1 个 decode 后 | **GDN 第 3 层起整片 inf（5120 个 = 全部）** | 仍有限 |
+| 第 2 个 decode 后 | 同上 | **GDN 第 3 层起 −inf** |
+
+⇒ 状态是被"已经变成非有限的 hidden"污染的结果，不是源头（源头在 GDN 之前）。
+
+**KV cache**（`[nan] kv cache blk0` 行，逐层 block 0）：
+
+| 层 | K cache | V cache |
+|---|---|---|
+| decode 后 | **含 NaN（计数 3840/512/4352/4864…，均为 256 的整数倍 = 逐 head-slot 粒度）**，最大幅值有限（5~9） | **最大幅值恒为 512.0**（每层、每次前向都一样）|
+
+⇒ V cache 里没有真实的激活值（恒定 512.0 不可能是 V），
+K cache 里有 NaN ⇒ **cache 的"写"或"读"与分配形状不一致**。
+
+**读侧不是元凶**：`XINFER_SKIP_FLASHINFER=1`（绕开 FlashInfer decode，
+改走原生 `paged_attention`）后，普通路径的 decode **同样**在第 3 层起变 inf
+（吞吐 43 → 17 t/s，但 NaN 依旧）⇒ 两个读内核都读到坏数据 ⇒ 坏的是 cache 内容。
+
+**MTP 路径的一个独立问题**：`mtp_decode_step1`（1 token 主干前向）与验算前向
+（K+1 token）各自把线性注意力状态往前推 ⇒ 状态每步前进 K+2 个 token，
+而不是"已提交数"；状态与 KV cache 因此失配。
+
+### 49.3 已排除
+
+| 路径 | 证据 |
+|---|---|
+| FlashInfer decode 内核读 cache 的方式错 | `XINFER_SKIP_FLASHINFER=1` 换原生读，NaN 依旧（49.2）|
+| GDN 状态在 prefill 里就溢出 | prefill 后逐层 conv/rec 状态全部有限、幅值 0.1~70（49.2）|
+| 探针报告的"prefill 第 3 层就 NaN" | 那是每层同步的探针自己扰动出来的；换成单次同步后 prefill 全干净（49.2）|
+| 权重/embedding 带 NaN | 全量扫字节：BF16/F32/e4m3 全 0（§48.2(4)）|
+
+### 49.4 真正的落点
+
+1. **KV cache 的内容被写坏**（首要）：分配形状是 `(num_blocks, block_size, kv_heads, hd)`
+   （`kvcache_allocator.rs:1891`），写走 `ReshapeCache`（`paged_attention.rs:1352`），
+   读分别走 FlashInfer decode 与原生 `paged_attention`。V cache 恒为 512.0、K cache 带 NaN
+   ⇒ **要么 V 的写根本没落到 cache 上，要么 K 的写落到了 V 的区域**。
+   下一步要一个"写完立刻回读单个 layer 的 K/V"的直读探针。
+2. **MTP 路径的状态推进量错误**（次要，但独立）：
+   `mtp_decode_step1` + 验算前向让 GDN 状态每步前进 `K+2`，而不是已提交数；
+   1Cat 形式（每步只有一次主干前向）天然消除这次多推进。
+
+### 49.5 阻塞点
+
+- 定位 1 需要"KV 写入后立刻回读"的探针（写内核与读内核都不动，只加回读）。
+- 定位 2 需要把 GDN 状态推进量与"已提交 token 数"对齐：要么走内核 REPLAY 路
+  （§47 证伪过：`rn` 传错），要么在 1Cat 形式下让主干前向只跑一次。

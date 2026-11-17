@@ -658,6 +658,21 @@ impl Qwen3_5ForCausalLM {
         let seq_slots = self.resolve_seq_slots(input_metadata, xs.dim(0)?)?;
         let mut mamba_cache = self.mamba_cache.write();
 
+        // Diagnostic: locate the first layer whose hidden state turns into NaN.
+        // Only runs when XINFER_DIAG_NAN is set, so the hot path is untouched.
+        let nan_probe = crate::utils::env::diag_nan();
+        let mut nan_counts: Vec<Tensor> = Vec::new();
+        let mut max_abs: Vec<Tensor> = Vec::new();
+        if nan_probe {
+            match diag_nonfinite(&xs) {
+                Ok((c, m)) => {
+                    nan_counts.push(c);
+                    max_abs.push(m);
+                }
+                Err(e) => crate::log_info!("[nan] probe failed at embed: {e}"),
+            }
+        }
+
         for (i, layer) in self.layers.iter().enumerate() {
             let cache = if layer.is_full_attention() {
                 if let Some(kv_caches) = kv_caches {
@@ -683,6 +698,15 @@ impl Qwen3_5ForCausalLM {
                 &mut mamba_cache,
                 &seq_slots,
             )?;
+            if nan_probe {
+                match diag_nonfinite(&xs) {
+                    Ok((c, m)) => {
+                        nan_counts.push(c);
+                        max_abs.push(m);
+                    }
+                    Err(e) => crate::log_info!("[nan] probe failed at layer {i}: {e}"),
+                }
+            }
             if std::env::var("XINFER_DIAG_GRAPH").is_ok() {
                 eprintln!("[diag][graph] layer {i} done");
             }
@@ -755,6 +779,135 @@ impl Qwen3_5ForCausalLM {
         }
 
         let xs = self.norm.forward(&xs)?;
+        // Diagnostic: the paged KV cache of every full-attention layer.  If the
+        // cache holds non-finite values after the prefill, the decode step reads
+        // garbage and the whole generation is invalid.
+        if nan_probe {
+            if let Some(kv) = kv_caches.as_ref() {
+                let mut lines: Vec<String> = Vec::new();
+                for (li, (k, v)) in kv.iter().enumerate() {
+                    let stat = |t: &Tensor| -> String {
+                        match t.narrow(0, 0, 1).and_then(|b| diag_nonfinite(&b)) {
+                            Ok((c, m)) => {
+                                let cv = c.to_vec1::<f32>().unwrap_or_default();
+                                let mv = m.to_vec1::<f32>().unwrap_or_default();
+                                format!(
+                                    "{:.0}/{:.3e}",
+                                    cv.first().copied().unwrap_or(0.0),
+                                    mv.first().copied().unwrap_or(0.0)
+                                )
+                            }
+                            Err(e) => format!("err {e}"),
+                        }
+                    };
+                    lines.push(format!("L{li} k={} v={}", stat(k), stat(v)));
+                }
+                crate::log_info!("[nan] kv cache blk0 nonfinite/maxabs: {}", lines.join(" "));
+            }
+            let dump_i64 = |t: Option<&Tensor>| -> String {
+                match t
+                    .map(|x| x.to_dtype(DType::I64))
+                    .transpose()
+                    .ok()
+                    .flatten()
+                    .and_then(|x| x.flatten_all().ok())
+                    .and_then(|x| x.to_vec1::<i64>().ok())
+                {
+                    Some(v) => format!(
+                        "[{}]",
+                        v.iter()
+                            .take(48)
+                            .map(|x| x.to_string())
+                            .collect::<Vec<_>>()
+                            .join(",")
+                    ),
+                    None => "<none>".to_string(),
+                }
+            };
+            crate::log_info!(
+                "[nan] slot_mapping={} ctx_len={} block_tables={}",
+                dump_i64(Some(&input_metadata.slot_mapping)),
+                dump_i64(input_metadata.context_lens.as_ref()),
+                dump_i64(input_metadata.block_tables.as_ref())
+            );
+        }
+
+        // Diagnostic: the GDN (linear attention) recurrent state of every layer.
+        // The state is the only thing that survives from one decode step to the
+        // next, so it is the first place to look when the decode step blows up
+        // while the prefill is fine.
+        if nan_probe {
+            let n_gdn = mamba_cache.num_gdn_layers();
+            let mut st_bad: Vec<String> = Vec::new();
+            let mut st_max: Vec<String> = Vec::new();
+            for l in 0..n_gdn {
+                for (tag, st) in [
+                    ("rec", mamba_cache.get_batch_recurrent_state(l, &seq_slots)),
+                    ("conv", mamba_cache.get_batch_conv_state(l, &seq_slots)),
+                ] {
+                    match st.and_then(|t| diag_nonfinite(&t)) {
+                        Ok((c, m)) => {
+                            let cv = c.to_vec1::<f32>().unwrap_or_default();
+                            let mv = m.to_vec1::<f32>().unwrap_or_default();
+                            st_bad.push(format!("{}:{}={:.0}", l, tag, cv.first().copied().unwrap_or(0.0)));
+                            st_max.push(format!("{}:{}={:.3e}", l, tag, mv.first().copied().unwrap_or(0.0)));
+                        }
+                        Err(_) => {
+                            st_bad.push(format!("{}:{}=err", l, tag));
+                        }
+                    }
+                }
+            }
+            crate::log_info!(
+                "[nan] gdn state nonfinite: {}",
+                st_bad
+                    .iter()
+                    .filter(|s| !s.ends_with("=0"))
+                    .cloned()
+                    .collect::<Vec<_>>()
+                    .join(" ")
+            );
+            crate::log_info!("[nan] gdn state maxabs: {}", st_max.join(" "));
+        }
+
+        if nan_probe && !nan_counts.is_empty() {
+            // One host read for the whole forward: layer 0 is the embedding,
+            // layer i is the output of decoder layer i-1.
+            if let Ok(counts) = Tensor::cat(&nan_counts, 0).and_then(|c| c.to_vec1::<f32>()) {
+                let mut first_bad: Option<usize> = None;
+                for (i, c) in counts.iter().enumerate() {
+                    if *c > 0.0 && first_bad.is_none() {
+                        first_bad = Some(i);
+                    }
+                }
+                let mags: Vec<f32> = Tensor::cat(&max_abs, 0)
+                    .and_then(|c| c.to_vec1::<f32>())
+                    .unwrap_or_default();
+                let mags: Vec<String> = mags
+                    .iter()
+                    .enumerate()
+                    .map(|(i, v)| format!("{}:{:.3e}", i, v))
+                    .collect();
+                let kinds: Vec<&str> = (0..counts.len())
+                    .map(|i| {
+                        if i == 0 {
+                            "embed"
+                        } else if self.layers[i - 1].is_full_attention() {
+                            "attn"
+                        } else {
+                            "gdn"
+                        }
+                    })
+                    .collect();
+                crate::log_info!(
+                    "[nan] per-layer nonfinite (len={}): {:?} first_bad={:?} maxabs={}",
+                    counts.len(),
+                    counts,
+                    first_bad,
+                    mags.join(" ")
+                );
+            }
+        }
         if return_hidden {
             xs.to_dtype(DType::F32)
         } else {
@@ -1022,4 +1175,35 @@ impl Qwen3_5ForCausalLM {
     pub fn dtype(&self) -> DType {
         self.dtype
     }
+}
+
+/// Number of NaN entries of a hidden-state tensor, computed on the GPU.
+///
+/// Diagnostic only (D10: gated by `XINFER_DIAG_NAN`).  The count stays on the
+/// device as a scalar tensor so the caller can concatenate the per-layer
+/// counts and read them back **once** at the end of the forward: a per-layer
+/// host read would synchronise the stream after every layer and change the
+/// timing of the very kernels we are trying to observe.
+fn diag_nan_count(xs: &Tensor) -> Option<Tensor> {
+    let flat = xs.flatten_all().ok()?.to_dtype(DType::F32).ok()?;
+    // NaN != NaN is true, and every finite value equals itself.
+    let ne = flat.ne(&flat).ok()?.to_dtype(DType::F32).ok()?;
+    ne.sum(0).ok()?.reshape(&[1]).ok()
+}
+
+/// Same as `diag_nan_count` but counts *every* non-finite value (NaN and
+/// +/-inf) and also returns the largest absolute value of the tensor.
+///
+/// An F16 hidden state that overflows carries +/-inf, not NaN; the final
+/// RMSNorm then turns it into NaN (`inf * rsqrt(inf) == NaN`).  Counting only
+/// NaN hides the overflow, so this probe reports both.
+fn diag_nonfinite(xs: &Tensor) -> Result<(Tensor, Tensor)> {
+    let flat = xs.flatten_all()?.to_dtype(DType::F32)?;
+    // NaN != NaN is true, and every finite value equals itself.
+    let nan = flat.ne(&flat)?.to_dtype(DType::F32)?;
+    let abs = flat.abs()?;
+    let inf = abs.eq(f32::INFINITY)?.to_dtype(DType::F32)?;
+    let nonfinite = nan.add(&inf)?.sum(0)?.reshape(&[1])?;
+    let maxabs = abs.max(0)?.reshape(&[1])?;
+    Ok((nonfinite, maxabs))
 }
