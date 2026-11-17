@@ -546,6 +546,23 @@ impl GatedDeltaNet {
         Ok((g.squeeze(0)?, beta.squeeze(0)?))
     }
 
+    /// `XINFER_DIAG_NAN=1` 时打印 GDN 第 0 层各阶段的幅值，用于定位
+    /// 残差流幅值爆炸发生在哪一段（投影 / 卷积 / 递推 / 门控+out_proj）。
+    fn diag_stage(&self, name: &str, t: &Tensor) {
+        if !crate::utils::env::diag_nan() || self.gdn_layer_idx != 0 {
+            return;
+        }
+        match t.flatten_all().and_then(|t| t.to_dtype(DType::F32)).and_then(|t| t.to_vec1::<f32>()) {
+            Ok(v) => {
+                let nan = v.iter().filter(|x| !x.is_finite()).count();
+                let max = v.iter().map(|x| x.abs()).fold(0f32, f32::max);
+                let n = v.len();
+                crate::log_info!("[nan] gdn0 {name}: n={n} nonfinite={nan} maxabs={max:.3e}");
+            }
+            Err(e) => crate::log_info!("[nan] gdn0 {name} probe failed: {e}"),
+        }
+    }
+
     fn finish_gdn_output(
         &self,
         output: Tensor,
@@ -553,6 +570,7 @@ impl GatedDeltaNet {
         original_dtype: DType,
     ) -> Result<Tensor> {
         let token_count = output.dim(0)?;
+        self.diag_stage("recur", &output);
         let output = output.reshape((token_count, self.value_dim))?;
         let gated_output = if self.gate_sigmoid {
             gdn::gated_rmsnorm_sigmoid_mul(
@@ -573,9 +591,11 @@ impl GatedDeltaNet {
                 self.head_v_dim,
             )?
         };
+        self.diag_stage("gated", &gated_output);
         let out = self
             .out_proj
             .forward(&gated_output.to_dtype(self.model_dtype)?)?;
+        self.diag_stage("out_proj", &out);
         if out.dtype() != original_dtype {
             out.to_dtype(original_dtype)
         } else {
@@ -1087,6 +1107,7 @@ impl GatedDeltaNet {
                 original_dtype,
             );
         }
+        self.diag_stage("qkv_proj", &qkv);
         let mixed_qkv = qkv;
 
         let (kv_conv, prefill_conv_state) = if is_prefill {

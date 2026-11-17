@@ -36,6 +36,29 @@ pub struct Qwen3_5DecoderLayer {
     rotary_emb: Option<Arc<ScalingRotaryEmbedding>>,
 }
 
+/// `XINFER_DIAG_NAN=1` 时打印第 0 层各阶段的幅值（每层两次调用，
+/// 故用 %128<2 命中第 0 层的 in_norm / mlp 两次）。
+fn dl(name: &str, t: &Tensor) {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    static CALLS: AtomicUsize = AtomicUsize::new(0);
+    if !crate::utils::env::diag_nan() {
+        return;
+    }
+    let i = CALLS.fetch_add(1, Ordering::Relaxed);
+    if i % 256 >= 4 {
+        return;
+    }
+    match t.flatten_all().and_then(|t| t.to_dtype(DType::F32)).and_then(|t| t.to_vec1::<f32>()) {
+        Ok(v) => {
+            let nan = v.iter().filter(|x| !x.is_finite()).count();
+            let max = v.iter().map(|x| x.abs()).fold(0f32, f32::max);
+            let n = v.len();
+            crate::log_info!("[nan] L0 {name}: n={n} nonfinite={nan} maxabs={max:.3e}");
+        }
+        Err(e) => crate::log_info!("[nan] L0 {name} probe failed: {e}"),
+    }
+}
+
 impl Qwen3_5DecoderLayer {
     pub fn new(
         vb: VarBuilderX,
@@ -148,6 +171,7 @@ impl Qwen3_5DecoderLayer {
     ) -> Result<Tensor> {
         let residual = xs;
         let xs = self.input_layernorm.forward(xs)?;
+        dl("in_norm", &xs);
 
         
 
@@ -167,6 +191,7 @@ impl Qwen3_5DecoderLayer {
                 gdn.forward(&xs, mamba_cache, input_metadata, seq_slots)?
             }
         };
+        dl("attn_out", &attn_output);
 
         
 
@@ -176,6 +201,8 @@ impl Qwen3_5DecoderLayer {
             .post_attention_layernorm
             .forward_add(&attn_output, residual)?;
         let mlp_output = self.mlp.forward(&xs)?;
+        dl("mlp_in", &xs);
+        dl("mlp_out", &mlp_output);
 
         
 
@@ -900,10 +927,11 @@ impl Qwen3_5ForCausalLM {
                     })
                     .collect();
                 crate::log_info!(
-                    "[nan] per-layer nonfinite (len={}): {:?} first_bad={:?} maxabs={}",
+                    "[nan] per-layer nonfinite (len={}): {:?} first_bad={:?} kinds={:?} maxabs={}",
                     counts.len(),
                     counts,
                     first_bad,
+                    kinds,
                     mags.join(" ")
                 );
             }
