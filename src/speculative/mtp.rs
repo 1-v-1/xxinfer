@@ -400,21 +400,12 @@ impl ModelRunner {
 
         let verify_result = verify_draft_greedy(&all_logits, &draft_tokens)?;
 
-        if verify_result.num_accepted < verify_result.num_proposed {
-            let commit_len = 1 + verify_result.num_accepted;
-            // Full-attention KV cache does not need explicit rollback: the next cycle's
-            // verify will overwrite rejected positions via append_kv_cache before the
-            // attention kernel reads them, and FlashInfer uses kCausal masking.
-            // GDN/Mamba state, however, is mutated in-place and must be rolled back.
-            let restored = self.rollback_mamba(seq_info.id, commit_len)?;
-            if !restored {
-                candle_core::bail!(
-                    "MTP failed to roll back mamba-state snapshot for seq {} to {} verified token(s)",
-                    seq_info.id,
-                    commit_len
-                );
-            }
-        }
+        // 1Cat has no rollback: the accepted count is the state column the kernel
+        // reads (num_accepted_tokens = diff(query_start_loc)); rejected columns
+        // are simply never selected again.
+        let step_token_count = verify_metadata.num_accepted_tokens().ok_or_else(||
+            candle_core::Error::msg("verify metadata has no query axis"))?;
+        let _ = &step_token_count;
 
         let mut result_tokens = Vec::with_capacity(2 + verify_result.num_accepted);
         result_tokens.push(anchor_token);

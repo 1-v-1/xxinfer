@@ -171,7 +171,13 @@ impl ModelRunner {
             is_mla: self.is_mla_model(),
             sequence_ids: Some(vec![seq_info.id]),
             mamba_slot_mapping,
-            slot_mapping: Tensor::from_vec(slot_mappings.to_vec(), (q_len,), self.device())?,
+                        // 1Cat `state_indices_tensor_d` is [batch, 1 + num_spec_tokens]: the token
+            // axis is a real axis, and the column a sequence keeps is picked inside
+            // the kernel by num_accepted_tokens = diff(cu_seqlens_q).
+            slot_mapping: Tensor::from_vec(
+                slot_mappings.to_vec(),
+                (1, q_len),
+                self.device())?,
             context_lens: Some(Tensor::from_vec(vec![total_kv_len], (1,), self.device())?),
             block_tables: Some(Tensor::from_vec(
                 seq_info.block_table.clone(),
