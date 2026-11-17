@@ -571,6 +571,8 @@ impl GatedDeltaNet {
     ) -> Result<Tensor> {
         let token_count = output.dim(0)?;
         self.diag_stage("recur", &output);
+        self.diag_stage("w:norm", &self.gdn_norm_weight);
+        self.diag_stage("gate:z", z);
         let output = output.reshape((token_count, self.value_dim))?;
         let gated_output = if self.gate_sigmoid {
             gdn::gated_rmsnorm_sigmoid_mul(
