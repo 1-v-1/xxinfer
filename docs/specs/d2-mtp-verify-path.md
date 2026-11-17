@@ -1362,3 +1362,21 @@ SM70（`sm_version<80`）+ 单列 F32 标度 + 模型 dtype F16 ⇒ **QPN8 打�
 参考实现 `qpn/fp8.py` 的契约是 **标度保持 F32**（`if weight_scale_inv.dtype != torch.float32: .to(torch.float32)`）。
 下一步：查 `attention.rs` 的 `fp8_qpn8_repack` 为何产出 F16/转置布局，按参考实现修，
 而不是长期靠 `XINFER_QPN8_DISABLE` 绕过。
+
+## 67. 判据④ 首轮 A/B（QPN8 关，服务端 `output_len` 口径）（case `d2#67`）
+
+`XINFER_QPN8_DISABLE=1`，greedy，`NTOK=256`，单请求，TP=2。服务端 `[Seq 0] ⏱ Decoded:` 行：
+
+| ctx | mtp | 服务端解码量 | 吞吐 | TTFT | 结果 |
+|---|---|---|---|---|---|
+| 24 | 0 | 111 tok / 7.59 s | **14.62 t/s** | 461 ms | 正确（"…answer is Paris"）|
+| 24 | 1 | — | — | — | **`CUDA_ERROR_OUT_OF_MEMORY`** → `MTP runner returned empty response` |
+| 768 | 0 | 256 tok / 17.13 s | **14.94 t/s** | 1231 ms | 正确 |
+| 768 | 1 | — | — | — | 同上 OOM |
+
+要点：
+1. **mtp=0 两档都跑满且文本正确** ⇒ §50 起"输出塌成 token 0"已消除（判据 ③ 达成）。
+2. **mtp=1 现在不是"快而假"，而是直接 OOM**：QPN8 关掉后权重以 `F8E4M3 + F32 标度` 原样驻留，
+   不再压进打包布局，显存上升后 draft/verify 的额外缓冲放不下。
+   ⇒ MTP 的 A/B 表要在"权重按参考实现契约保持 F32 标度"与显存预算之间定一个再出（判据 ④ 未完）。
+3. 客户端 `per_req_tok_per_s` 在 mtp=1 档为 0 是**因为请求被 cancel**，不是口径错。
