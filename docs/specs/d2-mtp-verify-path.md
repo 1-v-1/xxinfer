@@ -620,3 +620,16 @@ MTP head token_embed: n=5120 nan=154 absmean=NaN
 
 ### 34.5 阻塞点
 `attention.rs` 是 rev 锁定的 fork；按 AGENTS.md 硬约束 1，落点唯一 = `perf/sm70-volta`，需先确认 fork 侧改动如何锁 rev。
+
+## 35. fork 侧机制已存在，引擎侧没接（case `d2#35`）
+
+`gdn_verify_sm70.cu` 已经是 1Cat 形态：
+
+| 行 | 内容 |
+|---|---|
+| `:33` | `rbuf` 持 **两端 × nmax 序列** 的前/当前态 |
+| `:37` | `rn` = 上一轮要回放的 token（**它的接受数**），逐序列 |
+| `:41` | `rmap[n] = 2 * slot + side` |
+| `:42` | 本轮写 `side`，回放 `side ^ 1`；共享轮次计数 `ctr` 选端 |
+
+即"接受数就是内核读的那一列"在 fork 里已实现。`grep -ar replay_slots|rmap|round_counter` 在 `src/speculative/` **0 处命中** —— 引擎侧从没传过 `rn`/`rmap`/`ctr`。
