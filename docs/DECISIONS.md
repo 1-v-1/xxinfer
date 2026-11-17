@@ -75,3 +75,8 @@
 - 背景：此前流程第 1 步只写"对应主题文档"，没有固定形状；`@repro` 标记在 `tests/` 与 `src/` 实际 **0 处使用**，验收条与测试之间根本无从对账。
 - 决定：一项工作一份 `docs/specs/<id>-<subject>.md`，五节固定（CONVENTIONS §1.1）；验收条编号成 case id，测试标题写 `@case <spec-id>#<n>`，规格有而测试无、或测试有而规格无，都算红。判完生死即冻结。
 - 影响：`docs/design/` 只留上游逆向产物与已否决清单；样板 = [specs/nvfp4-hmma884-port.md](<./specs/nvfp4-hmma884-port.md>)。
+
+## D17 ✅ MTP 一步只跑一次整模型前向（照 1Cat）
+- 背景：MTP 开时一步跑两遍整模型 —— `mtp.rs:21` 的 `set_linear_is_prefill(false)` 盖住主干 decode 前向（走图 replay），`:297`/`:504` 的 `true` 盖住 verify 前向。`:24-25` 注释自证第①次产出的 `last_hidden_for_mtp` 第②次又产一遍，是纯重复。实测 `draft 5.28 + verify 32.27 = 37.55 ms` 对单跑 decode 的 `22.9 ms`。
+- 决定：草稿吃**同一次**前向顺带产出的 hidden，不再为它单跑一次主干。状态索引按 1Cat 形态走二维 `[batch, 1+K]`，接受数 = `diff(query_start_loc)`，由内核按 `(i_n, i_t)` 选列，不做事后回滚。
+- 影响：`src/speculative/mtp.rs` 的两次前向并成一次；`metadata.rs` 的 `slot_mapping` 已是 `(1, q_len)`（`eecb110`），内核侧需按二维消费。样板 = [specs/d2-mtp-verify-path.md](<./specs/d2-mtp-verify-path.md>) §29/§33。
