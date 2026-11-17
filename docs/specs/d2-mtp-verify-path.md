@@ -702,3 +702,38 @@ Tensor::zeros((max_verify_tokens, num_v_heads, head_k_dim, head_v_dim), DType::F
 所以 MTP 开在这台机上根本不是"慢"，是**路由错了内核**：verify 带着 `is_prefill=true`，落到了要求 SM90 的 chunked prefill 上。
 
 `deltanet.rs` 里 SM90 那条分支的判定在 `is_mtp_verify` 分支**之后**，但 `gdn_fast_prefill` 这条没有同样的护栏 —— 这是要修的点。
+
+## 40. 更正 §39：那条不是错，是诊断字段
+
+`sm70_diagnostics.rs:251-257`：
+
+```rust
+// The chunked GDN prefill kernel is SM90-only.
+let gdn_fast_prefill = cfg!(feature = "flashinfer")
+    && compute_capability == Some(90)
+    && crate::utils::env::sm90_lower_precision_gdn_prefill();
+let gdn_prefill_reason: Option<&'static str> = if gdn_fast_prefill {
+    None
+} else if compute_capability != Some(90) {
+    Some("the chunked GDN prefill kernel requires SM90")
+```
+
+`[slow] gdn_fast_prefill — …` 是诊断输出里的 `gdn_prefill_reason` 字段，**不是异常**。SM70 上快速路常关是设计如此。
+
+所以 §39 的"路由错了内核"结论**撤回**：verify 没落到 SM90 内核，它本来就该走 `gdn_verify_sm70`。`CUDA_LAUNCH_BLOCKING=1` 下没再出现越界，说明越界发生在异步流上、且**第一现场已被粘住的上下文吞掉**。
+
+## 41. 越界是竞态，不是步长（case `d2#41`）
+
+`CUDA_LAUNCH_BLOCKING=1` 那一跑：**越界条数 = 0**，且没有 `Forward error`。八格全跑通：
+
+| | MTP 关 | MTP 开 |
+|---|---|---|
+| ctx=24 | 16.31 / 16.86 | 13.43 / 13.25 |
+| ctx=768 | 17.14 / 17.04 | 13.15 / 13.16 |
+
+（同步跑把发射串行化，绝对值减半，只看两边相对关系。）
+
+## 两条结论
+
+1. **异步下崩、同步下不崩 ⇒ 是竞态**，不是 `s_idx`/`s_state` 这类步长。某处异步算子在快照行的有效窗口外读写它。
+2. **MTP 开仍比关慢**（`13.4 < 16.3`、`13.2 < 17.1`）—— 这与 §33 一致：一步两遍整模型，接受率修好也赚不回来。
