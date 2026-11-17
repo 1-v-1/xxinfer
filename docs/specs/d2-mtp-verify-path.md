@@ -1171,3 +1171,22 @@ mlp_in 6.879e0 → mlp_out 8.962e1
 ⇒ 待判只剩一步：确认加载期是否把检查点码**重新量化**成了另一套 (码, 标度)，
 且新标度按 `amax` 之外的口径算（例如把 `channel` 当成 `tensor_group` 的组内标度、
 或 `strategy` 没读出来时落到了 `unwrap_or(vec![128,128])` 的默认分块，见 `linear.rs:1131-1134`）。
+
+## 59. 修复落点：`QuantConfig` 从不解析 `strategy`（case `d2#59`）
+
+`src/utils/config.rs` 里 `strategy` 只出现在文档注释的示例串里（`"strategy": "group"`），
+**没有任何一处被反序列化成字段**；量化块信息只从顶层 `weight_block_size: Option<Vec<usize>>` 读。
+
+而本检查点把块信息放在 `config_groups.group_0.weights`：
+`{strategy: "channel", block_structure: null, group_size: null, scale_dtype: null, type: "float", symmetric: true}`。
+
+⇒ 走的是 `linear.rs:1131-1134` 的
+`quant_cfg.weight_block_size.clone().unwrap_or(vec![128,128])` 默认分块，
+`strategy: "channel"` 这个"每输出通道一个标度"的事实**从未被读进来**。
+`is_channel_scale_shape` 那条补救只在形状恰好匹配时才生效，且拿到的仍是同一份标度值——
+所以 §58 的 ~150× 只能来自"标度被按错误的轴/块宽施加"。
+
+修复（照抄参考实现 `qpn/fp8.py:process_weights_after_loading` 的做法：加载期就把标度吃进权重并校验行数）：
+1. `QuantConfig` 增加对 `config_groups.*.weights.strategy` / `block_structure` / `group_size` 的解析；
+2. `strategy == "channel"` ⇒ 块宽按 `[1, K]` 处理（而不是默认 `[128,128]`）；
+3. 加载期校验标度行数 == 期望（参考实现里 `expected_scale_rows` 那道断言），不等直接报错而不是静默错量级。
