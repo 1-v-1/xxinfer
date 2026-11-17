@@ -18,7 +18,8 @@ patent_*
 release.sh
 install.sh
 /test_data
-/scripts
+/scripts/*
+!/scripts/check_line_budget.py
 __pycache__/
 # MoE offload benchmark results (bench/bench_moe_offload.py output)
 /bench/*.md

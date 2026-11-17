@@ -13,6 +13,7 @@ SM70/V100 推理引擎移植。本仓是主项目；`../attention.rs`（内核�
 3. 先过精度再谈性能：精度按声明的容差判，性能给 A/B 数值表 + wins + 测量条件（D6/D12）。
 4. 被证伪的方案当场进 `docs/design/sm70_1cat_rejected_paths.md`，标 `否决`/`证伪`/`未准入` = 禁止重试（D4）。
 5. `src/` 内禁止裸 `println!`/`eprintln!`；重复日志用 `Once`/`OnceLock` 收敛或 `XINFER_DIAG_*` 门控（D9）。
+6. 代码行数预算：新建文件 ≤300 行（>600 必须拆）；存量超限文件**只许变短不许变长**（D18）。提交前跑 `python3 scripts/check_line_budget.py --changed`。
 
 ## 常用命令
 ```bash

@@ -46,6 +46,49 @@
 - 数值安全优先于速度：kernel 改动必须过精度探针（[TESTING.md](<./TESTING.md>) §2）。
 - 抄 1Cat kernel 连 shared memory 布局一起抄，不得改用 CUTLASS `ldmatrix` 套路（D2）。
 
+### 3.1 代码行数预算
+
+> 决策依据见 [D18](<./DECISIONS.md>)；检查器 `scripts/check_line_budget.py`；豁免登记见 [line_budget_exemptions.md](<./line_budget_exemptions.md>)。
+
+**口径**：按**文件总行数**计（含空行与注释；`--count-effective` 切换为近似有效行）。作用域 = `src/**/*.rs`；`tests/`、`example/`、`bench/` 不在此预算内（探针另有上限，见 §5）。
+
+**两档阈值**：
+
+| 档 | 行数 | 含义 |
+|---|---|---|
+| 软上限 | 300 | 新建文件的目标上限；存量文件超过此线即进入"冻结不增" |
+| 硬上限 | 600 | 新建文件不得超过；存量文件超过此线只许拆不许增 |
+
+**判定表**：
+
+| 情形 | 判定 |
+|---|---|
+| 新建 ≤ 300 行 | OK |
+| 新建 301–600 行 | WARN —— 提交信息里必须写明为什么不拆 |
+| 新建 > 600 行 | ERROR —— 必须拆 |
+| 存量 ≤ 300 行（增减都算） | OK |
+| 存量 > 300 行且行数增加 | ERROR —— 超限后冻结不增 |
+| 存量 > 300 行但行数减少 | OK —— 降债，方向正确 |
+
+**为什么存量是"冻结不增"而不是一刀切整改**：`src/` 现有 127 个文件 / 92.7k 行，其中 80 个 > 300 行、47 个 > 600 行（占全部行数的 76.6%）。要求一次全量拆分等于一次大重构，与"一个切片一提交"（[WORKFLOW.md](<./WORKFLOW.md>) §2）直接冲突，还会在精度/性能证据链上制造无法复核的大 diff。冻结不增让预算随时间单调收敛：**每个超限文件只能变短，不能变长**。
+
+**拆分方向**（按优先级，先便宜后彻底）：
+1. 抽纯数据 / 常量表 → 独立文件（`*_tables.rs`、`*_consts.rs`）。
+2. 抽单一职责模块 → 同名目录 + `mod.rs` 只做 re-export（`parser.rs` → `parser/`）。
+3. 抽 trait / 泛型参数，消掉"按模型 / 按 dtype / 按 shape 分支"的重复体（与 D5 family path 同向）。
+4. 抽跨层复用的算子 / 工具 → `src/utils/`。
+
+**豁免**（不计入预算）：生成代码（`*_generated.rs`）、纯查表/常量数据、探针与测试（探针上限 800 行）。豁免须在文件头写 `// line-budget: exempt <理由>`，**并**登记到 [line_budget_exemptions.md](<./line_budget_exemptions.md>)——无理由的豁免视为违规。
+
+**检查**：
+```bash
+python3 scripts/check_line_budget.py             # 全仓 src/
+python3 scripts/check_line_budget.py --changed   # 提交前：只看相对基线有改动的文件
+python3 scripts/check_line_budget.py --debt      # 盘点存量债务（不判失败）
+```
+
+**函数体**：单个函数 ≤ 80 行；> 100 行必须拆。此项由 code review 判定，不自动检查（函数边界识别不可靠，宁可漏报不误报）。
+
 ## 4. 日志与开关
 - `src/` 内禁止裸 `println!`/`eprintln!`（`tests/probes/`、`example/` 与一次性汇总除外）。诊断用 `tracing::debug!`，错误用 `error!`（D9）。
 - 会重复打的日志用 `Once`/`OnceLock` 收敛或加 env 门控。
@@ -55,6 +98,7 @@
 - 命名 `<subject>_<kind>_probe.rs`，`kind ∈ {precision, perf, breakdown, overhead}`，放 `tests/probes/`。
 - **必须**在 `Cargo.toml` 注册 `[[example]]`；精度探针配 `compare_*_probe.py`，用 `precision_metrics.py` 的 `report` 统一输出（D11）。
 - 产物落 `$XINFER_PROBE_DIR`：产物不入 git，结论入 git。
+- 单个探针 ≤ 800 行；超了通常说明混了多个 subject，拆成多个探针（每个 subject 一份产物 + 一份对比脚本）。
 
 ## 6. 硬性禁止
 - ❌ 无 A/B 实测的性能结论（"感觉更快"不算证据，D12）。
@@ -64,3 +108,4 @@
 - ❌ 用 `git cherry` / `--cherry` 当"没有回退"的证据——手工重写的回退查不出（D8）。
 - ❌ 把 1Cat 的 fast path 整条复制进某个模型（走 family path，D5）。
 - ❌ 静默改精度：改了就要说、要测、要写进契约（D6）。
+- ❌ 让超限文件继续变大（存量冻结不增，D18）；拆文件不许"拆完再塞回去"。

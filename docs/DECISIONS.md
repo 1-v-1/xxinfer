@@ -80,3 +80,8 @@
 - 背景：MTP 开时一步跑两遍整模型 —— `mtp.rs:21` 的 `set_linear_is_prefill(false)` 盖住主干 decode 前向（走图 replay），`:297`/`:504` 的 `true` 盖住 verify 前向。`:24-25` 注释自证第①次产出的 `last_hidden_for_mtp` 第②次又产一遍，是纯重复。实测 `draft 5.28 + verify 32.27 = 37.55 ms` 对单跑 decode 的 `22.9 ms`。
 - 决定：草稿吃**同一次**前向顺带产出的 hidden，不再为它单跑一次主干。状态索引按 1Cat 形态走二维 `[batch, 1+K]`，接受数 = `diff(query_start_loc)`，由内核按 `(i_n, i_t)` 选列，不做事后回滚。
 - 影响：`src/speculative/mtp.rs` 的两次前向并成一次；`metadata.rs` 的 `slot_mapping` 已是 `(1, q_len)`（`eecb110`），内核侧需按二维消费。样板 = [specs/d2-mtp-verify-path.md](<./specs/d2-mtp-verify-path.md>) §29/§33。
+
+## D18 ✅ 代码行数预算：300/600 两档 + 存量冻结不增
+- 背景：`src/` 127 文件 / 92.7k 行，>600 行 47 个文件（占 76.6% 行数），最大 `src/server/parser.rs` 4347 行、`src/server/claude_server.rs` 4252 行、`src/models/layers/moe.rs` 4135 行；`src/utils/mod.rs` 3044 行是典型杂物袋。文件体积已直接推高改动风险：单文件 diff 无法复核，精度/性能证据链（D6/D12）难以定位到具体片段。
+- 决定：软上限 **300** 行、硬上限 **600** 行（口径：文件总行数，作用域 `src/**/*.rs`）。新建文件 >300 行须在提交信息说明为什么不拆，>600 行必须拆；**存量超限文件只许变短不许变长**；豁免（生成代码 / 纯常量表 / 探针）须在文件头写 `line-budget: exempt <理由>` 并登记 [line_budget_exemptions.md](<./line_budget_exemptions.md>)。
+- 影响：不等存量整改（那是一次大重构，与 WORKFLOW §2「一个切片一提交」冲突），改为单调收敛：每个超限文件只能变短。检查器 `scripts/check_line_budget.py` 提供 `--changed`（提交前）与 `--debt`（盘点）两种视图，**暂不接 CI**，先本地跑。拆分顺序：抽常量表 → 抽同名目录（`mod.rs` 只 re-export）→ 抽 trait/泛型消分支（与 D5 同向）→ 抽 `src/utils/`。函数体 ≤80 行、>100 行必拆，由 review 判定（函数边界识别不可靠，不做自动检查）。规则全文见 [CONVENTIONS.md](<./CONVENTIONS.md>) §3.1。

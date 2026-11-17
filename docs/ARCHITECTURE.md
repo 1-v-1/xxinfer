@@ -34,6 +34,8 @@ xxinfer-dev/                       ← 开发工作区（本身不是 git 仓库
 | `src/speculative/` | 6 | 1.9k | 中，`mtp.rs` 与 `deltanet` 强耦合 |
 | `src/tools/`、`src/runner/`、`src/transfer/`、`src/py/`、`src/mcp/` | — | — | 小 |
 
+**行数预算**（D18）：软上限 300 / 硬上限 600 行；存量超限文件只许变短不许变长。上表"行数"列即当前基线——`src/models/` 39.6k 行摊在 66 个文件、`src/utils/` 19.5k 行摊在 23 个文件（`utils/mod.rs` 3044 行是典型杂物袋）、`src/server/` 13.2k 行摊在 6 个文件，是拆分的优先目标。规则与检查器见 [CONVENTIONS.md](<./CONVENTIONS.md>) §3.1。
+
 **三条最热路径**（改它们必须跑端到端 + 精度探针）：
 1. **GDN / MTP verify** — `src/models/layers/deltanet.rs`（`conv_snapshots`/`recurrent_snapshots`/`gdn_verify_mtp`）× `src/speculative/mtp.rs`。
 2. **量化线性层** — `src/models/layers/linear.rs` × `attention.rs/src/fp8_linear.rs`（QPN2/4/8 三套内核分发，dtype/布局/分块三重敏感）。

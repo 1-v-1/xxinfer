@@ -57,5 +57,6 @@
 [ ] 生效边界 + 回退路径已写清
 [ ] 结论已进 DECISIONS.md / 已否决清单
 [ ] Cargo.toml 的 git rev 与实际使用的 sha 一致
+[ ] python3 scripts/check_line_budget.py --changed 通过（行数预算，D18）
 [ ] 提交正文含实测数据，已 push
 ```

@@ -1019,3 +1019,22 @@ mlp_in 6.879e0 → mlp_out 8.962e1
 下一步（新会话直接照做）：对 `unsloth/Qwen3.8-27B-NVFP4` 的
 `layers.0.linear_attn.in_proj_z.weight` 与 `out_proj.weight` 直接做 fp4→fp32 反量化求 maxabs，
 与引擎里 `self.z`/`out_proj` 拿到的张量逐段比对，定位是全局标度没乘、还是分片/段偏移错了。
+
+## 52. 检查点/配置侧事实与 §51 的修正（case `d2#52`）
+
+**配置（`config.json`）**：`linear_num_key_heads=16`、`linear_key_head_dim=128` ⇒ `key_dim=2048`；
+`linear_num_value_heads=48`、`linear_value_head_dim=128` ⇒ `value_dim=6144`；
+`2×2048+6144=10240` = `conv1d`/`in_proj_qkv` 行数 ✓。
+
+**检查点（`model.safetensors` 头，第 0 层）**：`in_proj_qkv` F8_E4M3 `[10240,5120]` + `weight_scale [10240,1]`；
+`in_proj_z` `[6144,5120]`；`out_proj` `[5120,6144]`；`norm.weight` BF16 `[128]`；
+`linear_attn` 只有逐行 `weight_scale`，**没有** `weight_global_scale`/`input_global_scale`（MLP 两者都有）。
+
+**证伪**：§51 之后我一度推断“引擎把 `value_dim` 取成 3072 = 6144/2”。错——
+探针看到的 3072 是 **TP=2 的分片**（24 个 v-head × 128），不是半读。该推断作废，不得重试。
+
+**剩下的真异常（未决）**：同一层里 `in_proj_qkv` 的有效增益 ≈1.25（正常），
+而 `in_proj_z` 的有效增益 ≈0.0017（`gate:z` maxabs 7.99e-2 对 `in_norm` 4.82e1），
+`out_proj` 又是 ×4400（`gated` 2.31e-1 → `out_proj` 1.02e3）。
+首要嫌疑：逐行 `weight_scale` 在 z / out_proj 这两段上的施加方式（是否被当成全局标度、
+或分片后行偏移错位）。下一步按此对第 0 层做一次“反量化后逐段 maxabs”直读比对。
