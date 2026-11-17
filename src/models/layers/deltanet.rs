@@ -1196,6 +1196,7 @@ impl GatedDeltaNet {
                     seq_slots,
                     snaps,
                     cu_seqlens,
+                    input_metadata.num_accepted_tokens().as_ref(),
                     self.scale as f32,
                 )?
             } else if self.num_k_heads != self.num_v_heads {
