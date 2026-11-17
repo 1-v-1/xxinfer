@@ -599,3 +599,24 @@ MTP head token_embed: n=5120 nan=154 absmean=NaN
 ## 1Cat 形态 = 一次
 
 `state_indices [batch, 1+K]` 二维 + `num_accepted = diff(query_start_loc)` 内核里选行：草稿要的是**同一次前向**顺带产出的 hidden，不是再跑一遍主干。
+
+## 34. D17 的准入条件（D16 五段 · case `d2#34`）
+
+### 34.1 判据（怎么算过）
+真实 27B × 两卡，`c=1`，`ctx=24` 与 `ctx=768`，单发与并发各一遍；每格跑两次取一致值。
+过：MTP 开 ≥ 同格 MTP 关；`draft` 非全零；`accepted > 0`。
+
+### 34.2 现状（实测）
+一步 **两次**整模型前向：decode `22.9 ms`（`:21` `is_prefill=false`，走图 replay）+ verify `32.27 ms`（`:297`/`:504` `is_prefill=true`）= `60.9 ms` 换 `1.97 token`。
+
+### 34.3 已排除
+| 路径 | 证据 | 登记 |
+|---|---|---|
+| 验算只覆盖草稿行（删锚点行）| 四格 mtp=1 全 `0.0 tok/s` | `6cf849f` |
+| 命名 / 层前缀 / 量化配置三件套 | 全回退后症状不变 | `224f2d9`/`dbdbd0a`/`69bcade` |
+
+### 34.4 准入条件（唯一剩余形态）
+`state_indices` 二维 `[batch, 1+K]`（`metadata.rs` 已是 `(1, q_len)`，`eecb110`）+ `num_accepted = diff(cu_seqlens_q)`，由**内核按 `(i_n, i_t)` 选列**。即：改动落在 `attention.rs` 的状态索引消费侧，不在 `src/speculative/`。
+
+### 34.5 阻塞点
+`attention.rs` 是 rev 锁定的 fork；按 AGENTS.md 硬约束 1，落点唯一 = `perf/sm70-volta`，需先确认 fork 侧改动如何锁 rev。
