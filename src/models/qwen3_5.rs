@@ -541,8 +541,19 @@ impl Qwen3_5ForCausalLM {
     }
 
     pub fn embed_lookup(&self) -> Box<dyn Fn(&Tensor) -> candle_core::Result<Tensor> + 'static> {
+        // Same as `embed_forward`, not just `embed_tokens.forward`: the backbone
+        // continues in F32 on a quantised build (see embed_forward:524), and the
+        // draft head's norms are built with DType::F32.
         let e = self.embed_tokens.clone();
-        Box::new(move |t: &Tensor| e.forward(t))
+        let upcast = self.is_qvar_builder || self.config.quant.is_some();
+        Box::new(move |t: &Tensor| {
+            let x = e.forward(t)?;
+            if upcast && x.dtype() != candle_core::DType::F32 {
+                x.to_dtype(candle_core::DType::F32)
+            } else {
+                Ok(x)
+            }
+        })
     }
 
     pub fn embed_weight(&self) -> Tensor {
