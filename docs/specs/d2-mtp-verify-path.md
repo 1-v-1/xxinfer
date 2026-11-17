@@ -737,3 +737,29 @@ let gdn_prefill_reason: Option<&'static str> = if gdn_fast_prefill {
 
 1. **异步下崩、同步下不崩 ⇒ 是竞态**，不是 `s_idx`/`s_state` 这类步长。某处异步算子在快照行的有效窗口外读写它。
 2. **MTP 开仍比关慢**（`13.4 < 16.3`、`13.2 < 17.1`）—— 这与 §33 一致：一步两遍整模型，接受率修好也赚不回来。
+
+## 44. D17 真正的落点：整条 replay 路没被启用（case `d2#44`）
+
+`gdn.rs:2644-2650` 连着 **7 个空参**，全是同一条路的：
+
+```rust
+std::ptr::null(), // rbuf: non-replay route
+std::ptr::null(),
+std::ptr::null_mut(),
+0,
+std::ptr::null(),
+std::ptr::null(),
+std::ptr::null(),
+```
+
+内核侧 `:342` `const bool replay = rbuf != nullptr;` ⇒ `:375` `if (replay) go2(wr, std::true_type{})`。所以引擎一直走的是 `REPLAY=false` 那条。
+
+两条路的差别就在 §44 之前所有轮次想改的那几行：
+
+| | `REPLAY=false`（现在）| `REPLAY=true`（1Cat）|
+|---|---|---|
+| 取哪行 | `idx[n*s_idx + 0]`，逐序列一行 | `rmap[n] = 2*slot + side` |
+| 接受数 | 不参与 | `R0 = min(rn[n], TMAX)`，`:134` 逐 token 回放 |
+| 端 | 无 | 本轮写 `side`，回放 `side ^ 1` |
+
+**这才是 D17 的活**：给验算配 `rbuf`（两端 × `nmax`）、`rn`、`rmap`、`ctr`，让它走 `REPLAY=true`。调用侧换 `nacc`/`s_idx` 是隔靴搔痒 —— 已在 `a12d175` 回退并登记。
