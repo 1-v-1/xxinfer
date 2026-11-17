@@ -1041,3 +1041,4 @@ python -m tools.sm70_route_snapshot --category dflash2 \
 | W4A4 量化激活 | 投影输出 **+5.96% ~ +12.24%** rel L2 | quasar_tp2:170-176 |
 | 证伪：验算只覆盖草稿行（删锚点行以省一次前向） | 四格 mtp=1 全变 0.0 tok/s | d2#33 |
 | 证伪：调用侧把 nacc/s_idx/s_state/槽位改成二维喂 | mtp=1 四格全 ILLEGAL_ADDRESS，回退后恢复可跑 | d2#34-42 |
+| 证伪：给 SpecSeqInfo 加 accepted 字段喂 rn | 四处构造处开档形状不一（两处 match 臂、两处 .map 闭包），改写闭合符反复错位 | d2#46 |
