@@ -1039,3 +1039,4 @@ python -m tools.sm70_route_snapshot --category dflash2 \
 | q5 / q3 投机长度 | **-7.4% / -31.3%** | control:46322 / 46477 |
 | FP8 QPN8 native M64 | **-21.7%** | control:46454-46457 |
 | W4A4 量化激活 | 投影输出 **+5.96% ~ +12.24%** rel L2 | quasar_tp2:170-176 |
+| 证伪：验算只覆盖草稿行（删锚点行以省一次前向） | 四格 mtp=1 全变 0.0 tok/s | d2#33 |
