@@ -1254,3 +1254,29 @@ e4m3 字节被当整数值。qkv 走 merged 路（`load_merged_with_hints`）没
 修复要求（下一轮实现，照抄参考实现"加载期解码 + 行数断言"）：
 `LnFp8::new` 里权重必须按 **e4m3 语义**读出（请求 F8E4M3 得到 F8E4M3），
 拿到 U8 就 bail 并打印请求形状，而不是继续算。
+
+## 63. 构造期参数（根因链闭合）（case `d2#63`）
+
+临时在 `ln_fp8_x` 入口打印请求参数（rank0/rank1 各一条）：
+
+```
+out_dim=6144 in_dim=5120 shard={dim:0, rank:1, world:2} block=[128,128]   ← in_proj_z
+out_dim=6144 in_dim=5120 shard={dim:0, rank:0, world:2} block=[128,128]   ← in_proj_z
+out_dim=5120 in_dim=6144 shard={dim:1, rank:0, world:2} block=[128,128]   ← out_proj
+```
+
+要点：
+1. **`block=[128,128]` 是 `unwrap_or` 的默认值** —— 检查点把块信息放在
+   `config_groups.group_0.weights.strategy="channel"`（`block_structure:null`、`group_size:null`），
+   而 `QuantConfig` 只读顶层 `weight_block_size`，**从不解析 `strategy`**（§59 成立）。
+2. 于是 `scale_dim0=(6144+127)/128=49`、`scale_dim1=(5120+127)/128=40` —— 按"每 128 行一块"去要标度；
+   而检查点实际是 `[6144,1]` 每通道一个。`is_channel_scale_shape` 那条补救只在形状恰好吻合时才救得回来。
+3. 结合 §62：z 的 `w_dtype=U8`、`s_dtype=F16`，且权重/标度都被按转置视图存过
+   （`w=[5120,3072]`、`s=[1,3072]`），于是 e4m3 字节被当整数值、标度量级错 ~256×，
+   净效果 = 有效权重大 ~150×（§58）。
+
+## 修复（照抄 `qpn/fp8.py:process_weights_after_loading`）
+1. `QuantConfig` 解析 `config_groups.*.weights.{strategy, block_structure, group_size}`；
+   `strategy=="channel"` ⇒ 块宽 `[1, K]`，不再落默认 `[128,128]`。
+2. 加载期把标度吃进权重（或至少按正确轴施加），并像参考实现那样断言
+   `标度行数 == 期望行数`，不符直接 bail（打印请求形状），禁止静默换 dtype/量级。
