@@ -1594,3 +1594,23 @@ MTP 路不再 OOM，`Decoded:` 行正常出现。
 但 **MTP 现在是净变慢 ×3.4**：一个 MTP 步要 317 ms，而普通解码步只要 23 ms。
 一个 MTP 步 = 1 次主干 forward + K 次草稿 forward ≈ 4×23 = 92 ms，实测 317 ms ⇒ 多出 ~225 ms/步
 落在草稿循环或 gdn 状态回滚上，这是下一步要定位的点。
+
+## 81. MTP 每步 132 ms 的账（case `d2#81`）
+
+干净 K=3 运行（`DNAN=0 MRES=1024 MFRAC=0.999 K=3 CTX=768 NTOK=256`）：
+
+| 量 | 值 |
+|---|---|
+| 步数（`MTP draft 3 tok` 行数 ÷2，双 rank 各记一次） | **153** |
+| 每步产出 | 256 ÷ 153 = **1.67 tok/步**（满接受应为 4）|
+| 每步墙钟 | 20.23 s ÷ 153 = **132 ms** |
+| 已计时的两段 | `step1` 0.06 ms（仅 hidden 取出的调试计时）、`draft 3 tok` **6.32 ms** |
+| **未计时的主干 forward** | **≈126 ms** |
+
+⇒ 普通解码步（1 行）只要 23 ms，而 4 行的 verify 要 ~126 ms（**5.7×**）—— 这不是访存受限解码该有的样子。
+`XINFER_MTP_VERIFY_DECODE_KERNEL` 已经是 `1`（`/tmp/mvp` 内容即 `1`，`env_for` 会读它），
+所以"verify 走 prefill 内核"这条已被排除。
+
+**下一个要查的点**：verify 是 4 行批，若 CUDA graph 只按 batch=1 捕获，4 行就走不了图 ⇒ 落回 eager。
+`mtp_decode_breakdown_probe.sh` 输出的 `graphs=0` 与此一致。若成立，MTP 的理论吞吐是
+153×23 ms ≈ 3.5 s ⇒ **≈73 t/s**，正好对上假模型时代的 74 t/s。
