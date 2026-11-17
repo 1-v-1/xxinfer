@@ -548,6 +548,33 @@ impl GatedDeltaNet {
 
     /// `XINFER_DIAG_NAN=1` 时打印 GDN 第 0 层各阶段的幅值，用于定位
     /// 残差流幅值爆炸发生在哪一段（投影 / 卷积 / 递推 / 门控+out_proj）。
+    /// 一次性打印本层投影实际持有的 (weight, scale) 对：判「标度没乘 / 逐行被当全局」。
+    fn diag_proj_pair(&self, tag: &str, pair: Option<(&Tensor, &Tensor)>) {
+        if !crate::utils::env::diag_nan() || self.gdn_layer_idx != 0 {
+            return;
+        }
+        use std::sync::atomic::{AtomicBool, Ordering};
+        static DONE: AtomicBool = AtomicBool::new(false);
+        if DONE.swap(true, Ordering::Relaxed) {
+            return;
+        }
+        match pair {
+            Some((w, s)) => {
+                // 先转 F32 再 abs：SM70 无 uabs_u8 内核，直接 abs 会 CUDA_ERROR_NOT_FOUND。
+                let f = |t: &Tensor| {
+                    t.to_dtype(DType::F32)
+                        .and_then(|t| t.abs())
+                        .and_then(|t| t.flatten_all())
+                        .and_then(|t| t.max(0))
+                        .and_then(|t| t.to_scalar::<f32>())
+                };
+                let (wa, sa) = (f(w), f(s));
+                crate::log_info!("[nan] gdn0 {tag} fp8 pair: w_absmax={wa:?} s_absmax={sa:?} w_dims={:?}", w.dims());
+            }
+            None => crate::log_info!("[nan] gdn0 {tag}: 无 fp8 pair（走了别的量化路）"),
+        }
+    }
+
     fn diag_stage(&self, name: &str, t: &Tensor) {
         if !crate::utils::env::diag_nan() || self.gdn_layer_idx != 0 {
             return;
@@ -735,6 +762,7 @@ impl GatedDeltaNet {
                 in_proj_b,
                 in_proj_a,
             } => {
+                self.diag_proj_pair("in_proj_z", in_proj_z.fp8_weight_scale());
                 let proj_qkv = in_proj_qkv.forward(xs)?;
                 let z = in_proj_z.forward(xs)?;
                 let b = in_proj_b.forward(xs)?;
@@ -752,6 +780,11 @@ impl GatedDeltaNet {
                 in_proj_b,
                 in_proj_a,
             } => {
+                self.diag_proj_pair("in_proj_z", in_proj_z.fp8_weight_scale());
+                self.diag_proj_pair(
+                    "in_proj_qkv[0]",
+                    in_proj_qkv.parts().first().and_then(|l| l.fp8_weight_scale()),
+                );
                 let qkv = in_proj_qkv.forward(xs)?;
                 if qkv.len() != 3 {
                     candle_core::bail!(

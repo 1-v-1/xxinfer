@@ -192,6 +192,11 @@ pub struct MergedParallelColumnLinear {
 }
 
 impl MergedParallelColumnLinear {
+    /// 诊断用：暴露被合并的子投影，便于逐段核对反量化是否施加了逐行标度。
+    pub fn parts(&self) -> &[TensorParallelColumnLinear] {
+        &self.linears
+    }
+
     pub fn new(linears: Vec<TensorParallelColumnLinear>) -> Self {
         Self {
             linears,
