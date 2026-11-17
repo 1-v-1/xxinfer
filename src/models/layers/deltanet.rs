@@ -569,6 +569,9 @@ impl GatedDeltaNet {
                         .and_then(|t| t.to_scalar::<f32>())
                 };
                 let (wa, sa) = (f(w), f(s));
+                // 免索引映射的判据：引擎自己算出的「逐输出通道反量化 maxabs」分布，
+                // 与检查点直读的分布直接对（引擎 w 是 [K, N_shard]，故对轴 0 求 max）。
+                let rs = Self::deq_channel_stats(w, s);
                 let s4 = s
                     .to_dtype(DType::F32)
                     .and_then(|t| t.flatten_all())
@@ -580,13 +583,30 @@ impl GatedDeltaNet {
                     .and_then(|t| t.narrow(0, 0, 4))
                     .and_then(|t| t.to_vec1::<f32>());
                 crate::log_info!(
-                    "[nan] gdn0 {tag} fp8 pair: w_dims={:?} s_dims={:?} w_first4={w4:?} s_first4={s4:?} w_absmax={wa:?} s_absmax={sa:?}",
+                    "[nan] gdn0 {tag} fp8 pair: w_dims={:?} s_dims={:?} chan_maxabs[min/mean/max]={rs:?} w_first4={w4:?} s_first4={s4:?} w_absmax={wa:?} s_absmax={sa:?}",
                     w.dims(),
                     s.dims()
                 );
             }
             None => crate::log_info!("[nan] gdn0 {tag}: 无 fp8 pair（走了别的量化路）"),
         }
+    }
+
+    /// 反量化后「逐输出通道 maxabs」的 min/mean/max。引擎里 w 是 `[K, N_shard]`，
+    /// 输出通道在最后一轴，故对倒数第二轴（K）求 max 即得每通道最大值。
+    fn deq_channel_stats(
+        w: &Tensor,
+        s: &Tensor,
+    ) -> std::result::Result<[f32; 3], candle_core::Error> {
+        let wt = w.to_dtype(DType::F32)?;
+        let sb = s.to_dtype(DType::F32)?.broadcast_as(wt.dims())?;
+        let r = wt.abs()?.broadcast_mul(&sb)?;
+        let rm = r.max(r.dims().len() - 2)?;
+        Ok([
+            rm.min(0)?.to_scalar::<f32>()?,
+            rm.mean(0)?.to_scalar::<f32>()?,
+            rm.max(0)?.to_scalar::<f32>()?,
+        ])
     }
 
     fn diag_stage(&self, name: &str, t: &Tensor) {
