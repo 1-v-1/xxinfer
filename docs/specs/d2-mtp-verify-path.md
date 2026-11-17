@@ -1302,3 +1302,37 @@ z 那条方向对但量级仍错（§58 的 ~150×）。
 2. `ln_fp8_x` 里按**实际存储布局**求 `scale_dim0/scale_dim1`：权重是 `[K, N_shard]` 时，
    逐通道标度必须是 `[1, N_shard]`，不是 `[N_shard, 1]`。
 3. 加载期断言 `标度形状 == 期望形状`（参考实现的 `expected_scale_rows`），不符直接 bail。
+
+## 65. **证伪**：§58/§62/§64 的"150×"是诊断自身的假象（case `d2#65`）
+
+在 `ln_fp8_x` 里分三点打印，一次跑就翻案：
+
+| 位置 | dtype | dims |
+|---|---|---|
+| 加载后（`load_fp8_weight` + 按 dim0 分片） | **`F32`** | **`[3072, 1]`** ✓ 就是检查点的逐通道标度 |
+| `Ok(LnFp8{..})` 前（= 诊断读到的） | `F16` | `[1, 3072]` |
+| 权重同理 | 加载 `F8E4M3 [3072,5120]` → 诊断读到 `U8 [5120,3072]` |
+
+原因在 `linear.rs:1552-1558`：
+
+```rust
+let (weight, weight_scale) = if dtype == DType::F16
+    && weight_scale.dims2().map(|(_, c)| c == 1).unwrap_or(false)
+    && sm_version < 80
+    && weight_scale.dtype() == DType::F32
+    && std::env::var("XINFER_QPN8_DISABLE").is_err()
+{ attention_rs::fp8_linear::fp8_qpn8_repack(&weight, &weight_scale)? }
+```
+
+SM70（`sm_version<80`）+ 单列 F32 标度 + 模型 dtype F16 ⇒ **QPN8 打包路径本来就是活的**，
+`U8`/`F16`/`[1,3072]` 是**内核自己的打包布局**，不是"没解码/施加错轴"。
+
+⇒ §58 用 `|w|·s` 朴素广播去量"有效权重"，量的是**打包后的张量**，其 150× 与
+"min/mean/max 一致到 ±4%" 都是打包布局的产物 ⇒ **§58 的量级结论、§62 的"字节当整数值"、
+§64 的"施加错轴"全部作废**（D4：进 `docs/design/sm70_1cat_rejected_paths.md`，禁止再照它们改）。
+
+## 下一步（未被上面污染的真问题）
+判据仍是 §50.4 的逐阶段幅值：`in_norm 4.8e1 → qkv 6.1e1 → recur 4.0e0 → gated 2.3e-1 → out_proj 1.0e3`。
+要判的是**GEMM 输出**而不是打包张量：下一步按 `XINFER_QPN8_DISABLE=1` 与默认各跑一次，
+比较同一阶段的幅值 —— 若关掉打包后 `out_proj` 输出回到输入量级，问题在 repack/内核；
+若两档一样，问题在别处。
