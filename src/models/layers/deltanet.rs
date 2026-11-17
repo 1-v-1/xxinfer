@@ -549,13 +549,13 @@ impl GatedDeltaNet {
     /// `XINFER_DIAG_NAN=1` 时打印 GDN 第 0 层各阶段的幅值，用于定位
     /// 残差流幅值爆炸发生在哪一段（投影 / 卷积 / 递推 / 门控+out_proj）。
     /// 一次性打印本层投影实际持有的 (weight, scale) 对：判「标度没乘 / 逐行被当全局」。
-    fn diag_proj_pair(&self, tag: &str, pair: Option<(&Tensor, &Tensor)>) {
+    fn diag_proj_pair(&self, tag: &str, pair: Option<(&Tensor, &Tensor)>, bs: Option<&[usize]>) {
         if !crate::utils::env::diag_nan() || self.gdn_layer_idx != 0 {
             return;
         }
-        use std::sync::atomic::{AtomicBool, Ordering};
-        static DONE: AtomicBool = AtomicBool::new(false);
-        if DONE.swap(true, Ordering::Relaxed) {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        static CALLS: AtomicUsize = AtomicUsize::new(0);
+        if CALLS.fetch_add(1, Ordering::Relaxed) >= 4 {
             return;
         }
         match pair {
@@ -583,7 +583,7 @@ impl GatedDeltaNet {
                     .and_then(|t| t.narrow(0, 0, 4))
                     .and_then(|t| t.to_vec1::<f32>());
                 crate::log_info!(
-                    "[nan] gdn0 {tag} fp8 pair: w_dims={:?} s_dims={:?} chan_maxabs[min/mean/max]={rs:?} w_first4={w4:?} s_first4={s4:?} w_absmax={wa:?} s_absmax={sa:?}",
+                    "[nan] gdn0 {tag} fp8 pair: w_dims={:?} s_dims={:?} block_size={bs:?} chan_maxabs[min/mean/max]={rs:?} w_first4={w4:?} s_first4={s4:?} w_absmax={wa:?} s_absmax={sa:?}",
                     w.dims(),
                     s.dims()
                 );
@@ -796,7 +796,7 @@ impl GatedDeltaNet {
                 in_proj_b,
                 in_proj_a,
             } => {
-                self.diag_proj_pair("in_proj_z", in_proj_z.fp8_weight_scale());
+                self.diag_proj_pair("in_proj_z", in_proj_z.fp8_weight_scale(), in_proj_z.fp8_block_size());
                 let proj_qkv = in_proj_qkv.forward(xs)?;
                 let z = in_proj_z.forward(xs)?;
                 let b = in_proj_b.forward(xs)?;
@@ -814,10 +814,11 @@ impl GatedDeltaNet {
                 in_proj_b,
                 in_proj_a,
             } => {
-                self.diag_proj_pair("in_proj_z", in_proj_z.fp8_weight_scale());
+                self.diag_proj_pair("in_proj_z", in_proj_z.fp8_weight_scale(), in_proj_z.fp8_block_size());
                 self.diag_proj_pair(
                     "in_proj_qkv[0]",
                     in_proj_qkv.parts().first().and_then(|l| l.fp8_weight_scale()),
+                    in_proj_qkv.parts().first().and_then(|l| l.fp8_block_size()),
                 );
                 let qkv = in_proj_qkv.forward(xs)?;
                 if qkv.len() != 3 {

@@ -605,6 +605,14 @@ impl LinearX {
         }
     }
 
+    /// 诊断用：本层 fp8 实际生效的块宽（决定标度按哪个轴施加）。
+    pub fn fp8_block_size(&self) -> Option<&[usize]> {
+        match self {
+            Self::LnFp8(ln) => Some(&ln.weight_block_size),
+            _ => None,
+        }
+    }
+
     pub fn as_nvfp4(&self) -> Option<&LnNvfp4> {
         match self {
             Self::LnNvfp4(ln) => Some(ln),
