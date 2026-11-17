@@ -656,3 +656,17 @@ p.idx[n * p.s_idx + (REPLAY ? 0 : (p.nacc ? p.nacc[n] - 1 : 0))]
 | xinfer 现在 | `cu_seqlens_q` 跨的是**被提议**的 `1+K` 个 ⇒ `nacc[n]-1` 恒等于 `K=3`，与接受与否无关 |
 
 所以 `num_accepted_tokens()` 现在返回的是"这步带几个 token"，不是"接受了几个"。要它成立，`cu_seqlens_q` 必须按已接受数推进 —— 那是引擎步进的活，不是内核的。
+
+## 37. 保留数这条路走不通的原因（case `d2#37`）
+
+想按"逐步保留数"填 `seqlens`，但 `SpecSeqInfo` 只有 `id` / `len` / `block_table`（`metadata.rs:7-10`），**没有保留数字段**，已回退成 `None`。
+
+更重要的是重读内核那行后发现的：`s_idx` 改成行宽后，回退分支就已经是对的了 ——
+
+```c
+idx[n * s_idx + (nacc ? nacc[n] - 1 : 0)]
+```
+
+`s_idx = q_len`、`nacc[n] = q_len` ⇒ `nacc[n] - 1 = q_len - 1` = **最后一列**，正是"从本步最后一个 token 的状态续起"。
+
+所以 `mtp=1` 仍 `RemoteDisconnected` 的原因**不在 `nacc` 语义**，而在别处。本轮把这条排除掉。
