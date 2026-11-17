@@ -1380,3 +1380,27 @@ SM70（`sm_version<80`）+ 单列 F32 标度 + 模型 dtype F16 ⇒ **QPN8 打�
    不再压进打包布局，显存上升后 draft/verify 的额外缓冲放不下。
    ⇒ MTP 的 A/B 表要在"权重按参考实现契约保持 F32 标度"与显存预算之间定一个再出（判据 ④ 未完）。
 3. 客户端 `per_req_tok_per_s` 在 mtp=1 档为 0 是**因为请求被 cancel**，不是口径错。
+
+## 68. 位级核对：`×256` 是**正确补偿**，不是错量级（case `d2#68`）
+
+`fp8_qpn8_sm70.cu` 的两处：
+
+```cpp
+// 解码：把 e4m3 字节按位拼成 half
+value = ((permuted << 8) & 0x8000) | ((permuted << 7) & 0x3f80);
+// 标度：channel_scales[col] = __float2half(scales[col] * 256.0f);
+```
+
+`permuted << 7` 把 e4m3 的 `[s|eeee|mmm]` 直接落到 half 的 `[s|eeeee|mmmmmmmm]` 的指数字段，
+**没有加 `(15-7)<<10` 的偏置** ⇒ 解出来的值是**真值 / 256**，所以标度 `×256` 是**对的补偿**。
+⇒ "标度量级错"这一族理论到此终结（§58 的 256× 就是这条补偿，不是 bug）。
+
+索引也自洽（手算 5 个 lane 验证）：`qpn8_col_from_lane` 与 `qpn8_lane_from_col` 互逆：
+`col_from_lane(4)=8, col_from_lane(16)=4`；`lane_from_col(8)=4, lane_from_col(4)=16` ✓。
+写侧 `channel_scales[col]`（col = 真通道号），读侧 `group_scales[tile*32 + col_from_lane(lane)]`
+且码的 `lane = lane_from_col(row&31)` ⇒ 读到的就是 `scales[row]` ✓。
+
+## 因此下一步是数值探针，不是再猜
+对第 0 层同一段投影，用同一输入分别跑
+(a) `fp8_qpn8_gemm_f16`（打包路）与 (b) 朴素 `x @ dequant(w).t()`，比输出 maxabs。
+两路一致 ⇒ 打包路无罪，问题在别处；不一致 ⇒ 差异就是 §66 的 36×，再定位到 `split_k`/`tile` 边界。
