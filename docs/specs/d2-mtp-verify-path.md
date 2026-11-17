@@ -684,3 +684,21 @@ Tensor::zeros((max_verify_tokens, num_v_heads, head_k_dim, head_v_dim), DType::F
 三维里已对上的：`s_idx = q_len`（`fe9474d`）、`slot_mapping (1, q_len)`（`545a006`）、`snaps` 第 0 维 = token（本就如此）。
 
 剩下一处：`s_state` —— 状态槽位的步长。`idx` 存的现在是**逐 token 槽位**，而 `s_state` 仍按逐序列行算，内核按它跳行就会读到没分配过的行 → `CUDA_ERROR_ILLEGAL_ADDRESS`。
+
+## 39. 第一现场（`CUDA_LAUNCH_BLOCKING=1` 跑出来的）
+
+之前看到的 `ILLEGAL_ADDRESS` 是粘住的回声。逐次同步跑，真错是：
+
+```
+[slow]  gdn_fast_prefill — the chunked GDN prefill kernel requires SM90
+```
+
+| | |
+|---|---|
+| 这台机 | **SM70（Volta）** |
+| `is_prefill = true` 让 GDN 层去要 | `gdn_fast_prefill`，**要求 SM90** |
+| 而 SM70 上该走的是 | `gdn_verify_sm70`（fork 里就有 `gdn_verify_sm70.cu`）|
+
+所以 MTP 开在这台机上根本不是"慢"，是**路由错了内核**：verify 带着 `is_prefill=true`，落到了要求 SM90 的 chunked prefill 上。
+
+`deltanet.rs` 里 SM90 那条分支的判定在 `is_mtp_verify` 分支**之后**，但 `gdn_fast_prefill` 这条没有同样的护栏 —— 这是要修的点。
