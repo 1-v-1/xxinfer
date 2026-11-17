@@ -59,9 +59,16 @@ def env_for(mtp_on):
 
 
 def args_for(mtp_on, mml, seqs):
-    a = [BIN, "--m", MODEL, "--dtype", DTYPE, "--d", DEVS, "--max-model-len", str(mml),
-          "--max-num-seqs", str(seqs), "--mamba-fraction", MFRAC,
-          "--prefill-chunk-size", str(mml), "--ignore-eos"]
+    a = [BIN, "--m", MODEL, "--dtype", DTYPE, "--d", DEVS,
+          "--max-num-seqs", str(seqs), "--mamba-fraction", MFRAC, "--ignore-eos"]
+    # USEMML=1：按精确上下文长度规划；=0：改传 --kv-fraction（两者互斥，见 main.rs:100）；
+    # =2：都不传，让分配器按加载后剩余自动决定。
+    if os.environ.get("USEMML", "1") == "1":
+        a += ["--max-model-len", str(mml), "--prefill-chunk-size", str(mml)]
+    else:
+        kv = os.environ.get("KVFRAC")
+        if kv:
+            a += ["--kv-fraction", kv]
     if OK == "0":
         a += ["--disable-cuda-graph"]
     if mtp_on:

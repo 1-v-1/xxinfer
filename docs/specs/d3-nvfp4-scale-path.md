@@ -80,3 +80,25 @@ SM70 上 `compute capability 7 (<8), switched to F16` ⇒ 模型 dtype 为 F16�
 图本可提供摊销（4 行 ≈ 1 行 ⇒ ≈5.8 ms/tok ≈ 73 t/s），但本机装不下：`SEQS=1`、`MTP=0`、`OK=1`
 仍 `CUDA_ERROR_OUT_OF_MEMORY`。根因见 §84：`runner.rs:649` 用 `planned_graph_capture_batches`
 为 1..=容量(=10) 每个精确批各捕一张，而 `sparse_graph_capture_batches` 从未被 runner 调用。
+
+## 11. 开图实验全表（本轮，`OK=1`）
+
+给探针加了 `USEMML`/`KVFRAC` 开关（`USEMML=1` 传 `--max-model-len`；`=0` 传 `--kv-fraction`；
+`=2` 两者都不传 ⇒ 按 `main.rs:96` 注释"让分配器按加载后剩余自动决定"）。
+
+| 配置 | mtp=0 | mtp=1 |
+|---|---|---|
+| `USEMML=2`（自动决定）| ✅ **111 tok / 2.53 s = 43.86 t/s** | `CUDA_ERROR_OUT_OF_MEMORY` |
+| `USEMML=2` + `KVFRAC=0.9/0.8` | OOM | OOM |
+| `USEMML=1` + `(MFRAC,MRES)` 五档 | — | 全部捕获期 OOM |
+
+⇒ **图本身装得下**（mtp=0 开图跑通，43.86 t/s ≈ eager 的 44.01 t/s，batch=1 时两者同价）。
+缺口精确到 **MTP 自己的捕获**：`Captured batches [1]` 成功，但 mtp=1 时额外那份
+（`1+K` 行的 verify 状态 + 草稿循环的静态中间量）放不下。
+
+## 12. 下一步（超出本目标，待你点头）
+
+`runner.rs:649` 把 `graph_capture_max_num_seqs` 设成 `mamba_cache_capacity`，`planned_graph_capture_batches`
+于是为 `1..=容量` 每个精确批各捕一张。把它换成 `sparse_graph_capture_batches`（几何阶梯，
+`graph.rs` 里已存在但 runner 从未调用）可把捕获套数从 10 降到 4。风险：hybrid 注释称
+"state-slot mapping cannot be padded safely"，需连 replay 选 `>= bs` 那张图时的槽位一起验。
