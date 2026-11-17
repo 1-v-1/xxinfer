@@ -226,8 +226,7 @@ impl Qwen3_5MtpHead {
         // The mtp weights are unquantised F16 and use the plain `mtp.*` names. The
 // check is on the *mtp* builder with the *relative* key, which is how the
 // head actually resolves them (see `vb.pp("mtp").pp("pre_fc_norm_hidden")`).
-let is_qvar_builder = vb.is_qvar_builder()
-            && !vb.pp("mtp").has_key("pre_fc_norm_hidden.weight");
+let is_qvar_builder = vb.is_qvar_builder();
         let prefix = "mtp.";
         if crate::utils::env::diag_mtp() {
             crate::log_debug!(
@@ -255,11 +254,7 @@ let is_qvar_builder = vb.is_qvar_builder()
         let pre_fc_norm_hidden = rms_norm(
             hidden_size,
             config.rms_norm_eps,
-            if is_qvar_builder {
-                mtp_vb.pp("nextn.hnorm")
-            } else {
-                vb.pp(&format!("{}pre_fc_norm_hidden", prefix))
-            },
+            vb.pp(&format!("{prefix}pre_fc_norm_hidden")),
             DType::F32,
             !is_qvar_builder,
         )?;
@@ -267,11 +262,7 @@ let is_qvar_builder = vb.is_qvar_builder()
         let pre_fc_norm_embedding = rms_norm(
             hidden_size,
             config.rms_norm_eps,
-            if is_qvar_builder {
-                mtp_vb.pp("nextn.enorm")
-            } else {
-                vb.pp(&format!("{}pre_fc_norm_embedding", prefix))
-            },
+            vb.pp(&format!("{prefix}pre_fc_norm_embedding")),
             DType::F32,
             !is_qvar_builder,
         )?;
@@ -279,11 +270,7 @@ let is_qvar_builder = vb.is_qvar_builder()
         let fc = ReplicatedLinear::load_no_bias(
             hidden_size * 2,
             hidden_size,
-            if is_qvar_builder {
-                mtp_vb.pp("nextn.eh_proj")
-            } else {
-                vb.pp(&format!("{}fc", prefix))
-            },
+            vb.pp(&format!("{prefix}fc")),
             &mtp_quant_config,
             &None,
             dtype,
@@ -292,11 +279,7 @@ let is_qvar_builder = vb.is_qvar_builder()
         let norm = rms_norm(
             hidden_size,
             config.rms_norm_eps,
-            if is_qvar_builder {
-                mtp_vb.pp("nextn.shared_head_norm")
-            } else {
-                vb.pp(&format!("{}norm", prefix))
-            },
+            vb.pp(&format!("{prefix}norm")),
             DType::F32,
             !is_qvar_builder,
         )?;
