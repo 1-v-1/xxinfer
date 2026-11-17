@@ -1460,6 +1460,12 @@ impl Scheduler {
         let Some(stop_sequences) = &seq.sampling_params.stop_token_ids else {
             return None;
         };
+        // The server injects the engine's eos id into stop_token_ids, so a
+        // "stop sequence" hit would end the sequence even when the request
+        // asked to ignore eos.  Honour ignore_eos here.
+        if seq.sampling_params.ignore_eos && self.eos_token_id.contains(&token) {
+            return None;
+        }
         if stop_sequences.is_empty() {
             return None;
         }

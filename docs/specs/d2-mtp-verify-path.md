@@ -784,3 +784,82 @@ if constexpr (REPLAY) {
 
 1. `DecodeSequence` 已有 `last_block_tokens`（本步保留数），由 `prepare_decode` 填 —— 复用它，不加新字段；
 2. 让 `build_verify_metadata` 收一个 `prev_committed: usize` 形参，由 `mtp.rs` 从 `verify_result` 带过来。
+
+## 48. 真正的问题：MTP 路径的 logits 从第一步就是 NaN（case `d2#48`）
+
+### 48.1 判据（怎么算过）
+真实 27B（`unsloth/Qwen3.8-27B-NVFP4`，HF 缓存里那份，不下载）× 两卡（物理 4/5 → 0/1），`c=1`，
+`ctx=24` 与 `ctx=768`，每格起一台独立服务，单发一次、客户端墙钟计吞吐。
+过：**两条路径的 logits 都必须是有限值**（`nonzero = vocab`），生成内容不是恒定 token 0。
+
+### 48.2 现状（实测，日志 `srv_mtp{0,1}_mml{344,1088}_seqs1.log`）
+
+**(1) logits 诊断（`XINFER_DIAG_LOGITS=1`，同一提示、ctx=24）**
+
+| 路径 | `logits dims` min / max / mean | `logits vocab` nonzero |
+|---|---|---|
+| `mtp=0`（普通解码）| `-11.48 / 20.69 / -1.44` | `248320` ✅ |
+| `mtp=1`（MTP 路径）| `inf / -inf / 0` | **`0`** ❌ 全 NaN |
+
+**(2) 实际吐出的 token（`sampled token ids`，两个 rank 各打一遍）**
+
+| 路径 | 前 12 个采样 |
+|---|---|
+| `mtp=0` | `3793, 3793, 248046, 248046, 13114, 13114, 0, 0, 0, 0, 0, 0` ⇒ **第 4 步起塌成 token 0** |
+| `mtp=1` | `0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0` ⇒ **第 1 步就塌** |
+
+草稿侧同证：`ctx=24` 的 `MTP accept` **258/258 步** `proposed=3 accepted=0 draft=[0,0,0]`；
+`ctx=768` 末尾几步草稿是正常 token（`[11,321,32288]`、`[2179,332,248046]`），`accepted=1..2`。
+
+**(3) 吞吐（客户端墙钟）**
+
+| ctx | mtp | tokens | 墙钟 | tok/s | 说明 |
+|---|---|---|---|---|---|
+| 24 | 0 | 256 | 6.30 s | 42.7 | 跑满 |
+| 24 | 1 | 256 | 4.96 s | 56.9 | 跑满（**但内容是垃圾**）|
+| 768 | 0 | 256 | 6.51 s | 43.9 | 跑满 |
+| 768 | 1 | ≈45 | **1.57 s** | 28.4 | **第 20 个 token 吐 `248044`（eos）→ 序列提前结束** |
+
+⇒ 所谓"长上下文下 MTP 更慢（21.6 t/s）"这一格，**测的是 20 个 token 的残跑**，
+拿它跟 256 token 的整跑比。客户端口径本身也有缺陷（`mtp_api_perf_probe.py:124`
+`chunks = sum(len(st) ...)` 数的是 **SSE 非空增量条数**，不是 token 数）。
+
+**(4) 检查点是干净的**（扫了索引里全部 1878 个张量的原始字节）
+
+| dtype | 张量数 | NaN |
+|---|---|---|
+| BF16 | 1063 | **0** |
+| F32 | 336 | **0** |
+| F8_E4M3 | 401 | **0 字节**（含 `lm_head.weight`）|
+| U8（e2m1 packed）| 168 | 命中的 `0x7f/0xff` 是 4bit 码的巧合，e2m1 没有 NaN 编码 |
+
+⇒ **NaN 不是权重带来的，是运行时产生的。**
+
+### 48.3 已排除
+
+| 路径 | 证据 |
+|---|---|
+| 检查点里有 NaN 权重 | 全量扫字节：BF16/F32/e4m3 全 0（48.2(4)）|
+| 探针统计口径错 | 口径确实错（48.2(3)），但改口径不改变"长上下文那格只有 20 个 token"这个事实 |
+| `--ignore-eos` 没生效导致提前结束 | `scheduler.rs:620` 的 EOS 判定本来就看 `ignore_eos`；命中的是**服务端把 eos 塞进 `stop_token_ids`**（`server.rs:396-398`）后走的 `scheduler.rs:1459` 那条路，那条路不看 `ignore_eos` ⇒ 本次已补判断（见 48.4），但它不是主因：主因是模型吐垃圾 |
+| D17 的 replay 路（`df556ab` / `8db927d`）| 回退。`rn` 传的是本步提议数 `1+K`，不是上一步已提交数（§47），`R0` 会把状态推过头；实测四格全 `0.0`（`MTP runner returned empty response`）。回退 sha 已登记到 `docs/design/sm70_1cat_rejected_paths.md` |
+
+### 48.4 真正的落点（三条，按优先级）
+
+1. **MTP 路径的 logits 从第 1 步就 NaN，而普通路径前 3 步正常** ⇒ 差异只可能出在
+   "MTP 参与前向"的那一刻：**MTP 头前向 / 验算前向污染了共享 hidden 或线性注意力状态**。
+   这正是 D17 那条路要解决的东西，但它的优先级排在 NaN 之后 —— NaN 不修，测出来的任何吞吐都是垃圾上的吞吐。
+2. **普通路径第 4 步起也全 NaN** ⇒ 该模型/配置在 xinfer 上的前向本身有数值问题
+   （GDN 状态逐步累积？fp8 反量化？），与 MTP 无关，但同样会让所有对比失真。
+3. **验算前向 258/258 步 `graph=false`**（eager，`30–38 ms/步`）：整轮测量都在
+   `--disable-cuda-graph` 下跑，因为探针自己注明"真模型上 MTP+开图在捕获期 OOM"（`mtp_api_perf_probe.py:36`）。
+
+顺带修掉的一处口径：`scheduler.rs:1459` 的停止串判定现在看 `ignore_eos`
+（服务端注入的 eos id 不该在 `--ignore-eos` 下终止序列）。
+
+### 48.5 阻塞点
+
+- 定位 1 需要能在真模型上**单独**跑"主干前向"与"主干+MTP 头前向"并比对 logits；
+  现有 `mtp_probe`（`qwen3_5_mtp.rs:464`）只在 MTP 路径里打点，主干侧没有对应打点。
+- 定位 2 需要 GDN 状态**逐层**的 NaN 计数（`recurrent_state`），现在只有 `token_embed`/`norm_embed` 一层的痕迹（§32）。
+- 测量口径：探针的 token 计数要改成真 token 数（服务端回报 `output_len`），否则长上下文那格永远会被残跑污染。

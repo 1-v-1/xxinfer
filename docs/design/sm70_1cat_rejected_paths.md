@@ -1042,3 +1042,4 @@ python -m tools.sm70_route_snapshot --category dflash2 \
 | 证伪：验算只覆盖草稿行（删锚点行以省一次前向） | 四格 mtp=1 全变 0.0 tok/s | d2#33 |
 | 证伪：调用侧把 nacc/s_idx/s_state/槽位改成二维喂 | mtp=1 四格全 ILLEGAL_ADDRESS，回退后恢复可跑 | d2#34-42 |
 | 证伪：给 SpecSeqInfo 加 accepted 字段喂 rn | 四处构造处开档形状不一（两处 match 臂、两处 .map 闭包），改写闭合符反复错位 | d2#46 |
+| 证伪：给引擎配 replay 参数走内核 `REPLAY=true`（rbuf/rn/rmap/ctr） | `rn` 传的是本步提议数 `1+K` 而非上一步已提交数，`R0` 把状态推过头；mtp=1 四格全 0.0（`MTP runner returned empty response`）。被回退 sha `df556ab`(fork)/`8db927d`(引擎)，内核的 `REPLAY` 模板仍留在 `gdn_verify_sm70.cu` 未动，覆盖区间＝引擎侧接线 | d2#47-48 |
