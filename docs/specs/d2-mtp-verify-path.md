@@ -502,3 +502,37 @@ draft=[0,0,0] → accepted=0                                          ← §19
    ↓
 ctx=768  30.3 vs 43.9（目标 ≥43.7）                                  ← §14
 ```
+
+## 29. 1Cat 怎么做的 —— 读源码定的，不是探针试的
+
+### ① 一步多 token 是**一个融合内核**，不是 draft+verify+回滚三段
+
+`vllm/model_executor/layers/fla/ops/fused_sigmoid_gating.py:190-201`：
+
+```python
+if IS_SPEC_DECODING:
+    i_t = tl.load(num_accepted_tokens + i_n).to(tl.int64) - 1
+    if IS_DDTREE:
+        i_t = tl.maximum(i_t, 0)
+else:
+    i_t = 0
+```
+
+**接受数就是状态行的下标** —— 内核里直接按它选 state。所以 xinfer 的 `rollback_mamba(seq_id, commit_len)` 这一步在 1Cat **根本不存在**：没有"先按 K+1 写、再回滚到 accepted"，状态选择就是内核里的一次 `tl.load`。
+
+### ② 两个形状
+
+`vllm/v1/attention/backends/mamba_attn.py`
+
+| 行 | 内容 |
+|---|---|
+| `:147` | `state_indices_tensor_d = empty((decode_cudagraph_max_bs, 1 + num_spec_tokens))` — **每 token 一列** |
+| `:156` | `decode_num_accepted_tokens = empty((decode_cudagraph_max_bs,))` |
+| `:187` | `num_accepted_tokens = torch.diff(m.query_start_loc)` |
+| `:48` | `query_start_loc_d: [num_decodes + 1]` |
+
+序列轴→token 轴不是"展开成 K+1 次调用"，是**第二根轴**：状态索引本身就是 `[batch, 1+K]`，内核按 `(i_n, i_t)` 二维取。
+
+### ③ 对 xinfer 的含义
+
+`mtp.rs` 现在是 draft(5.28) + verify(32.27) + `rollback_mamba` 三段。1Cat 的形态是**一次启动、二维索引、接受数当下选行**。所以 §14 那个"一步 60.9 ms 换 1.97 token"在 1Cat 形态下不存在：没有独立 draft 段，也没有回滚段。
