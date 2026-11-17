@@ -569,7 +569,12 @@ impl GatedDeltaNet {
                         .and_then(|t| t.to_scalar::<f32>())
                 };
                 let (wa, sa) = (f(w), f(s));
-                crate::log_info!("[nan] gdn0 {tag} fp8 pair: w_absmax={wa:?} s_absmax={sa:?} w_dims={:?}", w.dims());
+                let s4 = s
+                    .to_dtype(DType::F32)
+                    .and_then(|t| t.flatten_all())
+                    .and_then(|t| t.narrow(0, 0, 4))
+                    .and_then(|t| t.to_vec1::<f32>());
+                crate::log_info!("[nan] gdn0 {tag} fp8 pair: w_absmax={wa:?} s_absmax={sa:?} s_first4={s4:?} w_dims={:?}", w.dims());
             }
             None => crate::log_info!("[nan] gdn0 {tag}: 无 fp8 pair（走了别的量化路）"),
         }
