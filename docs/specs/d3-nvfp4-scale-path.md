@@ -62,3 +62,21 @@ SM70 上 `compute capability 7 (<8), switched to F16` ⇒ 模型 dtype 为 F16�
 
 参考实现 `/Volumes/SMB重要/1Cat-vLLM`(bcd581d230) `qpn/fp8.py:process_weights_after_loading`
 把标度强制为 float32 且要求 orig_dtype float16 —— 即"标度保持 F32、不重排"。本仓默认已与之对齐。
+
+## 9. `d3#4` MTP A/B 表（`DNAN=0 MRES=1024 MFRAC=0.999 K=3 NTOK=256`，TP=2，单请求）
+
+| ctx | mtp | 解码量 | 耗时 | 吞吐 | 每步 |
+|---|---|---|---|---|---|
+| 24 | 0 | 111 tok | 2.52 s | **44.01 t/s** | 22.7 ms |
+| 24 | 1 | 8 tok | 0.74 s | 10.80 t/s | — |
+| 768 | 0 | 256 tok | 5.91 s | **43.29 t/s** | 23.1 ms |
+| 768 | 1 | 256 tok | 20.31 s | **12.61 t/s** | ≈132 ms |
+
+`accepted 非恒 0` 成立：`K=3` 跑满 256、`K=1` 只出 113（提前命中 EOS）。
+
+## 10. 为什么比值是负的（结构性）
+
+`MTP verify m=4 graph=false in 92.81 ms` ≈ 4 × 23 ms —— eager 无批摊销，每行与普通解码一步同价。
+图本可提供摊销（4 行 ≈ 1 行 ⇒ ≈5.8 ms/tok ≈ 73 t/s），但本机装不下：`SEQS=1`、`MTP=0`、`OK=1`
+仍 `CUDA_ERROR_OUT_OF_MEMORY`。根因见 §84：`runner.rs:649` 用 `planned_graph_capture_batches`
+为 1..=容量(=10) 每个精确批各捕一张，而 `sparse_graph_capture_batches` 从未被 runner 调用。
