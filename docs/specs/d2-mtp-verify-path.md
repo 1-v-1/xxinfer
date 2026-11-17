@@ -1117,3 +1117,37 @@ mlp_in 6.879e0 → mlp_out 8.962e1
 1. 打印引擎 `w` 的**前 4 个码值**（不是 maxabs）与 `weight_block_size`、以及 GEMM 走的是 `weight_scale` 还是 `weight_scale_cutlass`；
 2. 与检查点 `[6144,5120]` 的码按 `[K,N_shard]` 转置后的前 4 个逐元素比。位等即证明"只是转置视图"，
    不等即证明"被重新量化过/取错张量"。
+
+## 57. 位等比对闭合：形状自洽但**乘积大 ~10³**（case `d2#57`）
+
+量化配置（`config.json.quantization_config`，`compressed-tensors` / `mixed-precision`）：
+
+| 组 | 覆盖 | `weights.strategy` | `group_size` | `scale_dtype` |
+|---|---|---|---|---|
+| group_0 | `linear_attn.{in_proj_qkv,in_proj_z,out_proj}`、`self_attn.*` | **`channel`** | `None` | `None` |
+| group_1 | `mlp.{gate,up,down}_proj` | `tensor_group` | `16` | `torch.float8_e4m3fn` |
+| ignore | `re:mtp\..*`、`lm_head`、`linear_attn.norm/_b/_a` | — | — | — |
+
+⇒ 投影段是**逐通道 fp8**（`[N,1]`），MLP 才是 16 分块；MTP 层在 ignore 里（bf16，不受本问题影响）。
+
+`in_proj_z` 两侧对齐（引擎 `[K,N_shard]=[5120,3072]`，`s_dims=[1,3072]` ✓ 形状自洽）：
+
+| 量 | 引擎 | 检查点 |
+|---|---|---|
+| 形状 | `w=[5120,3072]` `s=[1,3072]` | `W=[6144,5120]` `S=[6144,1]` |
+| 前 4 个码（解码后） | `242, 110, 117, 108` | 列0 视图 `56, -36, 56, 28` |
+| 码 absmax | `254` | `448`（e4m3 饱和） |
+| 前 4 个标度 | `3.0884e-2, 5.3955e-2, 3.6377e-2, 2.9663e-2` | `1.4299e-4, 1.6600e-4, 1.3600e-4, 1.4000e-4` |
+| 标度 absmax | `1.3574e-1` | `5.3024e-4` |
+| **乘积** | `242×3.0884e-2 = 7.47` | `56×1.4299e-4 = 8.01e-3` |
+
+**乘积差 ≈ 9.3e2（~10³）**，且码与标度各自都不同 ⇒ 引擎这对不是检查点那份的原样视图。
+前 4 个元素对不上也可能只是 TP 分片/头交织的索引置换，需按 `undo_tiled_v_heads_first_dim`
+的反向映射还原后再比。
+
+两个仍未排除的根因：
+1. 加载期被**重新量化**过（自算标度），且新标度算错量级；
+2. GEMM 侧把标度当**逆标度**用（`linear.rs:1163-1169` 会回退到 `weight_scale_inv` 这个键名，
+   说明本仓同时存在两种约定）。
+
+下一轮：按分片索引置换还原引擎前 4 列对应的全局行号，再逐元素比；同时确认 GEMM 是乘还是除。
