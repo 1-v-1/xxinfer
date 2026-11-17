@@ -1503,4 +1503,5 @@ kvcache_allocator: GPU 0: total 15.00 GB, free 3.05 GB, kv_fraction 80%,
 **当前状态**：① 位等同比对已做（§74 表：`rp.scale`/`rp.codes`/`real.gold` 三项对上，
 `real.packed` 不等价）；② 已按参考实现契约把正确路径设为默认（§74）；
 ③ 已复测（`attn_out` 回到输入量级、输出不再全 token 0）；
-④ MTP A/B 表因上述显存预算未出。
+④ MTP A/B 表已出（见 d3 §9）：43.29 vs 12.66 t/s（×3.4 慢），
+   且慢是结构性的——eager 无批摊销 + 本机装不下 CUDA graph。
