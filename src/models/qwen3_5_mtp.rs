@@ -296,11 +296,7 @@ let is_qvar_builder = vb.is_qvar_builder();
             config.rope_theta,
         )?);
 
-        let layer_prefix = if is_qvar_builder {
-            mtp_block_prefix
-        } else {
-            format!("{}layers.0", prefix)
-        };
+        let layer_prefix = format!("{}layers.0", prefix);
         let attn = Attention::new(
             if is_qvar_builder {
                 vb.pp(&layer_prefix)
