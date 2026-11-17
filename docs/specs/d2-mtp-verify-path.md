@@ -763,3 +763,24 @@ std::ptr::null(),
 | 端 | 无 | 本轮写 `side`，回放 `side ^ 1` |
 
 **这才是 D17 的活**：给验算配 `rbuf`（两端 × `nmax`）、`rn`、`rmap`、`ctr`，让它走 `REPLAY=true`。调用侧换 `nacc`/`s_idx` 是隔靴搔痒 —— 已在 `a12d175` 回退并登记。
+
+## 47. replay 路跑通后，`rn` 的取值差（case `d2#47`）
+
+内核 `:130-142` 把这条写得很死：
+
+```c
+const float* prv = REPLAY ? p.rbuf + ((long long)(side ^ 1u) * p.nmax + rs) * SEQ : nullptr;
+if constexpr (REPLAY) {
+  for (int t = warp; t < R0; t += WARPS) {   // R0 = min(rn[n], TMAX)
+    ...  // 把上一轮的 k / v 从 rbuf 搬进 smem 再推一遍
+```
+
+| | `rn[n]` 要的是 | 现在传的是 |
+|---|---|---|
+| 值 | **上一轮已提交**的 token 数（`verify.rs:12 num_accepted` + 1）| `diff(cu_seqlens)` = **本步被提议**的 `1+K` |
+| 差 | 接受 < 提议时，多推的几行把状态推过头 | — |
+
+引擎侧要把它送到层里，`SpecSeqInfo` 加字段那条已证伪（四处构造处开档形状不一，`03aad93`）。剩余做法二选一：
+
+1. `DecodeSequence` 已有 `last_block_tokens`（本步保留数），由 `prepare_decode` 填 —— 复用它，不加新字段；
+2. 让 `build_verify_metadata` 收一个 `prev_committed: usize` 形参，由 `mtp.rs` 从 `verify_result` 带过来。
