@@ -1482,3 +1482,25 @@ value = ((permuted << 8) & 0x8000) | ((permuted << 7) & 0x3f80);
 
 **验证**：`env -u XINFER_QPN8_DISABLE`（即不设任何相关变量）跑 greedy：
 输出 `"The user asks for the capital of France in one word. The answer is Paris"` ✓
+
+## 75. 判据④ 仍被显存预算卡住（case `d2#75`）
+
+默认配置（不设任何相关变量）跑 `MTP=1`，服务端显存事实：
+
+```
+kvcache_allocator: GPU 0: total 15.00 GB, free 3.05 GB, kv_fraction 80%,
+                   Max usable cache budget 2.44 GB
+```
+
+| 尝试 | 结果 |
+|---|---|
+| 默认 `kv_fraction=0.8` | `Runner MTP decode error: CUDA_ERROR_OUT_OF_MEMORY` |
+| `EXTRA="--kv-fraction 0.5"` | **仍 OOM**（`MTP runner returned empty response`）|
+
+⇒ MTP 的 draft/verify 额外缓冲放不下 27B 权重加载后剩下的 ~3 GB。
+`mamba_fraction`（混合模型里从 cache 预算里划给 mamba/gdn 状态的百分比）是下一个未试的杠杆。
+
+**当前状态**：① 位等同比对已做（§74 表：`rp.scale`/`rp.codes`/`real.gold` 三项对上，
+`real.packed` 不等价）；② 已按参考实现契约把正确路径设为默认（§74）；
+③ 已复测（`attn_out` 回到输入量级、输出不再全 token 0）；
+④ MTP A/B 表因上述显存预算未出。
