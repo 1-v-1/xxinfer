@@ -1614,3 +1614,38 @@ MTP 路不再 OOM，`Decoded:` 行正常出现。
 **下一个要查的点**：verify 是 4 行批，若 CUDA graph 只按 batch=1 捕获，4 行就走不了图 ⇒ 落回 eager。
 `mtp_decode_breakdown_probe.sh` 输出的 `graphs=0` 与此一致。若成立，MTP 的理论吞吐是
 153×23 ms ≈ 3.5 s ⇒ **≈73 t/s**，正好对上假模型时代的 74 t/s。
+
+## 82. MTP 慢的真因：图捕获 OOM ⇒ verify 落回 eager（case `d2#82`）
+
+日志里两条直接证据：
+
+```
+INFO  xinfer::runner: CUDA graph capture disabled by --disable-cuda-graph
+DEBUG xinfer::speculative::mtp: MTP verify m=4 graph=false in 92.81 ms
+```
+
+`[slow] cuda_graph — graph capture was skipped or failed` 就是这条。
+探针 `OK` 默认 `0`（注释：*真模型上 MTP+开图在捕获期 OOM，默认关*），所以整条 MTP 路一直在 eager。
+
+### 开图（`OK=1`）扫参结果
+
+| MFRAC | MRES | 结果 |
+|---|---|---|
+| 0.999 | 1024 | `Insufficient GPU memory for KVCache allocation` |
+| 0.35 / 0.6 / 0.5 | 2048 / 1024 / 1536 | 同上 |
+| 0.35 / 0.2 / 0.1 | 128 / 128 / 64 | **`Graph capture failed: CUDA_ERROR_OUT_OF_MEMORY`** |
+
+⇒ 卡点定位到**图捕获期**本身：`HYBRID_MAMBA_GRAPH_CAPTURE_MAX_BATCH = 32`（"capture is planned for
+every exact batch up to 32"），而每 slot 73.41 MB × 48 层。MTP verify 是 `m=4` 批 ⇒ 捕获要为
+4 行各留一份状态副本，权重加载后每卡只剩 ~3 GB，装不下。
+
+### 为什么这值关键
+
+| | 每步 | 256 tok 总时 | 吞吐 |
+|---|---|---|---|
+| 普通解码（1 行，走图） | 23 ms | 5.91 s | 43.29 t/s |
+| MTP verify `m=4` **graph=false** | 92.81 ms | 20.23 s | 12.66 t/s |
+| MTP verify `m=4` 若走图（≈23 ms） | — | ≈3.5 s | **≈73 t/s** |
+
+⇒ 73 t/s 正好对上假模型时代测到的 74 t/s —— 说明那个数本来就是"走图"的量级。
+MTP 要真正提速，卡点是让 `m=4` 的 verify 也能走图，而不是继续调 MFRAC/MRES。
