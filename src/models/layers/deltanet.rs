@@ -548,8 +548,9 @@ impl GatedDeltaNet {
 
     /// `XINFER_DIAG_NAN=1` 时打印 GDN 第 0 层各阶段的幅值，用于定位
     /// 残差流幅值爆炸发生在哪一段（投影 / 卷积 / 递推 / 门控+out_proj）。
-    /// 一次性打印本层投影实际持有的 (weight, scale) 对：判「标度没乘 / 逐行被当全局」。
-    fn diag_proj_pair(&self, tag: &str, pair: Option<(&Tensor, &Tensor)>, bs: Option<&[usize]>) {
+    /// 一次性打印本层投影实际持有的 (weight, scale) 对：判「字节被当整数值」。
+    /// 实现见 `layers::diag_fp8`（D18：本文件已超软上限，只许变短）。
+    fn diag_proj_pair(&self, tag: &str, pair: Option<(&Tensor, &Tensor)>) {
         if !crate::utils::env::diag_nan() || self.gdn_layer_idx != 0 {
             return;
         }
@@ -558,55 +559,7 @@ impl GatedDeltaNet {
         if CALLS.fetch_add(1, Ordering::Relaxed) >= 4 {
             return;
         }
-        match pair {
-            Some((w, s)) => {
-                // 先转 F32 再 abs：SM70 无 uabs_u8 内核，直接 abs 会 CUDA_ERROR_NOT_FOUND。
-                let f = |t: &Tensor| {
-                    t.to_dtype(DType::F32)
-                        .and_then(|t| t.abs())
-                        .and_then(|t| t.flatten_all())
-                        .and_then(|t| t.max(0))
-                        .and_then(|t| t.to_scalar::<f32>())
-                };
-                let (wa, sa) = (f(w), f(s));
-                // 免索引映射的判据：引擎自己算出的「逐输出通道反量化 maxabs」分布，
-                // 与检查点直读的分布直接对（引擎 w 是 [K, N_shard]，故对轴 0 求 max）。
-                let rs = Self::deq_channel_stats(w, s);
-                let s4 = s
-                    .to_dtype(DType::F32)
-                    .and_then(|t| t.flatten_all())
-                    .and_then(|t| t.narrow(0, 0, 4))
-                    .and_then(|t| t.to_vec1::<f32>());
-                let w4 = w
-                    .to_dtype(DType::F32)
-                    .and_then(|t| t.flatten_all())
-                    .and_then(|t| t.narrow(0, 0, 4))
-                    .and_then(|t| t.to_vec1::<f32>());
-                crate::log_info!(
-                    "[nan] gdn0 {tag} fp8 pair: w_dims={:?} s_dims={:?} block_size={bs:?} chan_maxabs[min/mean/max]={rs:?} w_first4={w4:?} s_first4={s4:?} w_absmax={wa:?} s_absmax={sa:?}",
-                    w.dims(),
-                    s.dims()
-                );
-            }
-            None => crate::log_info!("[nan] gdn0 {tag}: 无 fp8 pair（走了别的量化路）"),
-        }
-    }
-
-    /// 反量化后「逐输出通道 maxabs」的 min/mean/max。引擎里 w 是 `[K, N_shard]`，
-    /// 输出通道在最后一轴，故对倒数第二轴（K）求 max 即得每通道最大值。
-    fn deq_channel_stats(
-        w: &Tensor,
-        s: &Tensor,
-    ) -> std::result::Result<[f32; 3], candle_core::Error> {
-        let wt = w.to_dtype(DType::F32)?;
-        let sb = s.to_dtype(DType::F32)?.broadcast_as(wt.dims())?;
-        let r = wt.abs()?.broadcast_mul(&sb)?;
-        let rm = r.max(r.dims().len() - 2)?;
-        Ok([
-            rm.min(0)?.to_scalar::<f32>()?,
-            rm.mean(0)?.to_scalar::<f32>()?,
-            rm.max(0)?.to_scalar::<f32>()?,
-        ])
+        super::diag_fp8::proj_pair(tag, pair);
     }
 
     fn diag_stage(&self, name: &str, t: &Tensor) {
@@ -796,7 +749,7 @@ impl GatedDeltaNet {
                 in_proj_b,
                 in_proj_a,
             } => {
-                self.diag_proj_pair("in_proj_z", in_proj_z.fp8_weight_scale(), in_proj_z.fp8_block_size());
+                self.diag_proj_pair("in_proj_z", in_proj_z.fp8_weight_scale());
                 let proj_qkv = in_proj_qkv.forward(xs)?;
                 let z = in_proj_z.forward(xs)?;
                 let b = in_proj_b.forward(xs)?;
@@ -814,11 +767,10 @@ impl GatedDeltaNet {
                 in_proj_b,
                 in_proj_a,
             } => {
-                self.diag_proj_pair("in_proj_z", in_proj_z.fp8_weight_scale(), in_proj_z.fp8_block_size());
+                self.diag_proj_pair("in_proj_z", in_proj_z.fp8_weight_scale());
                 self.diag_proj_pair(
                     "in_proj_qkv[0]",
                     in_proj_qkv.parts().first().and_then(|l| l.fp8_weight_scale()),
-                    in_proj_qkv.parts().first().and_then(|l| l.fp8_block_size()),
                 );
                 let qkv = in_proj_qkv.forward(xs)?;
                 if qkv.len() != 3 {

@@ -1,6 +1,7 @@
 pub mod attention;
 pub mod deepstack;
 pub mod deltanet;
+pub mod diag_fp8;
 pub mod distributed;
 pub mod ds_v4;
 pub mod indexer;
