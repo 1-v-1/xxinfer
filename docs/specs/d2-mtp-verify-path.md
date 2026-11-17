@@ -1280,3 +1280,25 @@ out_dim=5120 in_dim=6144 shard={dim:1, rank:0, world:2} block=[128,128]   ← ou
    `strategy=="channel"` ⇒ 块宽 `[1, K]`，不再落默认 `[128,128]`。
 2. 加载期把标度吃进权重（或至少按正确轴施加），并像参考实现那样断言
    `标度行数 == 期望行数`，不符直接 bail（打印请求形状），禁止静默换 dtype/量级。
+
+## 64. 结构事实：权重按 `[K, N_shard]` 存，而标度按 `[N, K]` 语义施加（case `d2#64`）
+
+`LnFp8::forward`（`linear.rs:1555-1582`）把 `(weight, weight_scale, weight_block_size)` 直接交给
+`attention_rs::fp8_linear::fp8_matmul_with_input_scale`。而两侧实测布局：
+
+| 段 | `w_dims` | `s_dims` | `block_size` | 标度实际沿哪根轴 |
+|---|---|---|---|---|
+| `in_proj_qkv` | `[5120, 5120]` = `[K, N_shard]` | `[5120, 1]` | `[1, 5120]` | **沿 dim0 = K**（每 K 一个）|
+| `in_proj_z` | `[5120, 3072]` = `[K, N_shard]` | `[1, 3072]` | `[1, 5120]` | 沿 dim1 = N ✓ |
+
+⇒ 权重是**转置布局** `[K, N_shard]`（检查点是 `[N, K]`），而 `ln_fp8_x` 按 `[N, K]` 语义算
+`scale_dim0/scale_dim1` 与 `block_size`。qkv 那条因此把"每输出通道一个标度"施加成了"每 K 一个"，
+z 那条方向对但量级仍错（§58 的 ~150×）。
+
+这也解释了 §55/§56 的"比值非常数"：那是**按错轴取值时的索引置换**，不是标度本身被改。
+
+## 修复（照抄 `qpn/fp8.py:process_weights_after_loading`）
+1. `QuantConfig` 解析 `config_groups.*.weights.strategy`；`"channel"` ⇒ 块宽 `[1, K]`（不再落默认 `[128,128]`）。
+2. `ln_fp8_x` 里按**实际存储布局**求 `scale_dim0/scale_dim1`：权重是 `[K, N_shard]` 时，
+   逐通道标度必须是 `[1, N_shard]`，不是 `[N_shard, 1]`。
+3. 加载期断言 `标度形状 == 期望形状`（参考实现的 `expected_scale_rows`），不符直接 bail。
