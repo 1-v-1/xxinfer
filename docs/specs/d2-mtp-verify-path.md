@@ -1530,3 +1530,23 @@ You provided both max_model_len and kv_fraction!
 
 **MTP 的加速比因此暂不可引用**：不是"还没测"，而是当前 2×16 GB 上 MTP 路根本起不来。
 非-mtp 基线已可引用：ctx=24 → 43.96 t/s，ctx=768（跑满 256）→ 44.32 t/s（§69）。
+
+## 77. 三个杠杆全部试尽（case `d2#77`）
+
+| 杠杆 | 结果 |
+|---|---|
+| 默认（无额外参数） | `CUDA_ERROR_OUT_OF_MEMORY` |
+| `--kv-fraction 0.5` | 与 `args_for` 恒传的 `--max-model-len` 互斥 → `main.rs:100` panic |
+| `--mamba-fraction 0.1`（单独给，不互斥） | **仍** `CUDA_ERROR_OUT_OF_MEMORY` |
+
+⇒ ④ 的阻塞条件是**容量性**的：27B NVFP4 在 TP=2 下每卡权重 ~13.5 GB，加载后每卡仅剩 ~3 GB，
+而 MTP 的 draft/verify 需要额外的第 0 层状态槽位与 verify 批缓冲，放不进去。
+`mamba_fraction` 只是在 2.44 GB 预算内部切分，改不了预算本身。
+
+## 结论（本目标的可引用部分）
+
+- 真因已修：QPN8 逐通道重排不等价于朴素反量化 matmul（§73/§74），正确路径已是默认（§74）。
+- 输出不再塌成 token 0（§66/§74 的 `"…The answer is Paris"`）。
+- 非-mtp 基线可引用：ctx=24 → 43.96 t/s；ctx=768（跑满 256）→ 44.32 t/s（§69）。
+- **MTP 加速比不可引用**：不是未测，而是 2×16 GB 上 MTP 路起不来（§75–§77）。
+  要出 ④ 需要更大显存或更小模型，属环境约束而非代码缺陷。
