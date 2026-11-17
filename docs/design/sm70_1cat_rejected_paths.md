@@ -1046,4 +1046,4 @@ python -m tools.sm70_route_snapshot --category dflash2 \
 | 证伪：FlashInfer decode 读 cache 的方式与写侧布局不一致 | `XINFER_SKIP_FLASHINFER=1` 换原生 `paged_attention` 读同一份 cache，普通路径 decode 仍在第 3 层起出 inf（见 d2#49）| d2#49 |
 | 证伪：GDN 状态在 prefill 阶段就溢出（状态是 NaN 源头）| prefill 后逐层 conv/rec 状态全部有限（幅值 0.1~70），状态变 inf 发生在 hidden 已经非有限之后（见 d2#49）| d2#49 |
 
-- **证伪 · qpn8 打包路（逐通道形态）** — 证据： 在 N=3072,K=5120 真实量级下 packed=inf 而 fallback=2.1470e-04（d2#73/#74）。替代路径：标度保持 F32 不重排（= 参考实现 qpn/fp8.py 契约），已由 env::qpn8_repack_enabled() 默认关闭。
+- **证伪 · qpn8 打包路（逐通道形态）** — 证据：tests/probes/qpn8_channel_probe.rs 在 N=3072,K=5120 真实量级下 packed=inf 而 fallback=2.1470e-04（d2#73/#74）。替代路径：标度保持 F32 不重排（= 参考实现 qpn/fp8.py 契约），已由 env::qpn8_repack_enabled() 默认关闭。
