@@ -1404,3 +1404,21 @@ value = ((permuted << 8) & 0x8000) | ((permuted << 7) & 0x3f80);
 对第 0 层同一段投影，用同一输入分别跑
 (a) `fp8_qpn8_gemm_f16`（打包路）与 (b) 朴素 `x @ dequant(w).t()`，比输出 maxabs。
 两路一致 ⇒ 打包路无罪，问题在别处；不一致 ⇒ 差异就是 §66 的 36×，再定位到 `split_k`/`tile` 边界。
+
+## 69. 判据④ 干净口径 A/B（探针关 `DNAN=0`，`XINFER_QPN8_DISABLE=1`）（case `d2#69`）
+
+诊断本身会物化全尺寸 F32 副本（`channel_stats` 的 `broadcast_as` + `abs` + `mul`），
+所以取数一律 `DNAN=0`。greedy，`NTOK=256`，单请求，TP=2，服务端 `[Seq 0] ⏱ Decoded:` 口径：
+
+| ctx | mtp | 服务端解码量 | 吞吐 | 备注 |
+|---|---|---|---|---|
+| 24 | 0 | 111 tok / 2.53 s | **43.96 t/s** | 111 个即命中 EOS（未到 256）|
+| 24 | 1 | — | — | `Runner MTP decode error: CUDA_ERROR_OUT_OF_MEMORY` |
+| 768 | 0 | **256 tok / 5.78 s** | **44.32 t/s** | 跑满 256 ✓ |
+| 768 | 1 | — | — | 同上 OOM |
+
+要点：
+1. 与 §50 的"假模型"基线（42.38 t/s）同量级 ⇒ **正确模型下的非-mtp 基线成立**。
+2. **MTP 路在"权重不被 qpn8 打包"的形态下起不来**：解包形态下每次调用要现取反量化副本，
+   draft/verify 的额外缓冲放不下 ⇒ `CUDA_ERROR_OUT_OF_MEMORY`。
+   所以 ④ 的加速比必须等 §68 的打包路数值探针出结论后才能出，不能靠绕过。
