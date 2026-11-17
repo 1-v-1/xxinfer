@@ -633,3 +633,26 @@ MTP head token_embed: n=5120 nan=154 absmean=NaN
 | `:42` | 本轮写 `side`，回放 `side ^ 1`；共享轮次计数 `ctr` 选端 |
 
 即"接受数就是内核读的那一列"在 fork 里已实现。`grep -ar replay_slots|rmap|round_counter` 在 `src/speculative/` **0 处命中** —— 引擎侧从没传过 `rn`/`rmap`/`ctr`。
+
+## 36. `nacc` 接上后的语义差（case `d2#36`）
+
+`results.jsonl` 第 6 行实测：
+
+```json
+{"error": "", "wall_s": 0.297, "round": 1, "mtp": true, "ctx_tokens": 768, "concurrency": 1, "out_tokens": 256, "k": 3, "mml": 1088}
+```
+
+`error` 是**空串**、`wall_s=0.297` —— 请求跑完了但没出 token，所以没有 `per_req_tok_per_s`。不是崩，是选错列。
+
+内核 `gdn_verify_sm70.cu:95`：
+
+```c
+p.idx[n * p.s_idx + (REPLAY ? 0 : (p.nacc ? p.nacc[n] - 1 : 0))]
+```
+
+| | `diff(query_start_loc)` 跨的是什么 |
+|---|---|
+| 1Cat | **已接受**的 token 数 ⇒ `−1` 正好指到最后那个被接受的 token |
+| xinfer 现在 | `cu_seqlens_q` 跨的是**被提议**的 `1+K` 个 ⇒ `nacc[n]-1` 恒等于 `K=3`，与接受与否无关 |
+
+所以 `num_accepted_tokens()` 现在返回的是"这步带几个 token"，不是"接受了几个"。要它成立，`cu_seqlens_q` 必须按已接受数推进 —— 那是引擎步进的活，不是内核的。
