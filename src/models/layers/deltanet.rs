@@ -1183,14 +1183,6 @@ impl GatedDeltaNet {
                 // 1Cat gdn_verify_sm70: one kernel runs the whole T-step
                 // recurrence, writes each step's state into the snapshot row
                 // and returns o; gating/L2-norm happen inside the kernel.
-                    // The snapshot buffer has one row per TOKEN POSITION (0..token_count),
-                    // not one per global slot id: slot_mapping's values are physical block
-                    // offsets (metadata.rs:28), which index far past its 4 rows.
-                    let token_index = Tensor::from_vec(
-                        (0..token_count).map(|v| v as i64).collect::<Vec<_>>(),
-                        (token_count,),
-                        xs.device(),
-                    )?;
                 let snaps = recurrent_snapshots
                     .as_ref()
                     .expect("MTP verify needs recurrent snapshot buffer");
@@ -1201,12 +1193,9 @@ impl GatedDeltaNet {
                     &self.a_log,
                     &self.dt_bias,
                     &*global_state,
-                    // The verify kernel indexes idx[n * s_idx + (nacc[n] - 1)], so it needs the
-                    // per-token slot array with the token-axis stride, not one slot per sequence.
-                    &token_index,
+                    seq_slots,
                     snaps,
                     cu_seqlens,
-                    input_metadata.num_accepted_tokens().as_ref(),
                     self.scale as f32,
                 )?
             } else if self.num_k_heads != self.num_v_heads {
