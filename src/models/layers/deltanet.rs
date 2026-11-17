@@ -1193,7 +1193,9 @@ impl GatedDeltaNet {
                     &self.a_log,
                     &self.dt_bias,
                     &*global_state,
-                    seq_slots,
+                    // The verify kernel indexes idx[n * s_idx + (nacc[n] - 1)], so it needs the
+                    // per-token slot array with the token-axis stride, not one slot per sequence.
+                    &input_metadata.slot_mapping,
                     snaps,
                     cu_seqlens,
                     input_metadata.num_accepted_tokens().as_ref(),
