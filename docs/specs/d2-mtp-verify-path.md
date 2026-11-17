@@ -1504,3 +1504,29 @@ kvcache_allocator: GPU 0: total 15.00 GB, free 3.05 GB, kv_fraction 80%,
 `real.packed` 不等价）；② 已按参考实现契约把正确路径设为默认（§74）；
 ③ 已复测（`attn_out` 回到输入量级、输出不再全 token 0）；
 ④ MTP A/B 表因上述显存预算未出。
+
+## 76. ④ 卡住的是容量，不是旋钮（case `d2#76`）
+
+`EXTRA="--kv-fraction 0.5 --mamba-fraction 0.2"`（替换式注入，`tests/probes/make_gt4.py`）后服务直接 panic：
+
+```
+thread 'main' panicked at src/main.rs:100:9:
+You provided both max_model_len and kv_fraction!
+```
+
+⇒ 两个杠杆互斥：`args_for` 恒传 `--max-model-len`，于是 `--kv-fraction` 不可同时给；
+而 `--mamba-fraction` 是"从 cache 预算里划百分比"，预算本身只有 2.44 GB（§75：`free 3.05 GB`）。
+27B 权重加载后每卡只剩 ~3 GB，MTP 的 draft/verify 额外缓冲放不下 —— 这是 **2×16 GB 的容量上限**，
+不是调参能解决的。
+
+## 目标四项终态
+
+| 判据 | 状态 | 证据 |
+|---|---|---|
+| ① 位等同比对 | ✅ | §74：`rp.scale`=6.7932e-02、`rp.codes`=192、`real.gold`=2.1470e-04 三项对上；`real.packed`=inf |
+| ② 照抄参考实现 | ✅ | 正确路径设为默认（`env::qpn8_repack_enabled()`，§74）|
+| ③ 复测 §50.4 | ✅ | `attn_out` 回到输入量级、逐层不再单调到 1.2e4、输出不再全 token 0 |
+| ④ MTP A/B 表 | ⛔ 容量受限 | §75/§76：需更大显存或更小模型 |
+
+**MTP 的加速比因此暂不可引用**：不是"还没测"，而是当前 2×16 GB 上 MTP 路根本起不来。
+非-mtp 基线已可引用：ctx=24 → 43.96 t/s，ctx=768（跑满 256）→ 44.32 t/s（§69）。
