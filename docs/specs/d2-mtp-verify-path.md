@@ -670,3 +670,17 @@ idx[n * s_idx + (nacc ? nacc[n] - 1 : 0)]
 `s_idx = q_len`、`nacc[n] = q_len` ⇒ `nacc[n] - 1 = q_len - 1` = **最后一列**，正是"从本步最后一个 token 的状态续起"。
 
 所以 `mtp=1` 仍 `RemoteDisconnected` 的原因**不在 `nacc` 语义**，而在别处。本轮把这条排除掉。
+
+## 38. 快照缓冲其实已是 token 索引的（case `d2#38`）
+
+`deltanet.rs:1007` 分配：
+
+```rust
+Tensor::zeros((max_verify_tokens, num_v_heads, head_k_dim, head_v_dim), DType::F32, ..)
+```
+
+`:1177` 取用 `.narrow(0, 0, token_count)`。所以 `snaps` 的第 0 维**本来就是 token 数**，不是逐序列一行 —— 我上一轮"snaps 缺 token 轴那一维"的判断**错了**，撤回。
+
+三维里已对上的：`s_idx = q_len`（`fe9474d`）、`slot_mapping (1, q_len)`（`545a006`）、`snaps` 第 0 维 = token（本就如此）。
+
+剩下一处：`s_state` —— 状态槽位的步长。`idx` 存的现在是**逐 token 槽位**，而 `s_state` 仍按逐序列行算，内核按它跳行就会读到没分配过的行 → `CUDA_ERROR_ILLEGAL_ADDRESS`。
